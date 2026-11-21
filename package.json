@@ -1,0 +1,25 @@
+{
+  "name": "kennel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Run Claude Code and Codex agents as remote, queueable sessions.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false && tsc -p packages/core/tsconfig.typecheck.json --pretty false && tsc -p packages/mcp/tsconfig.typecheck.json --pretty false && tsc -p packages/server/tsconfig.typecheck.json --pretty false",
+    "test": "npm run build && node --disable-warning=ExperimentalWarning --import tsx --test --test-force-exit packages/core/test/*.test.ts packages/mcp/test/*.test.ts packages/server/test/*.test.ts",
+    "start": "node --disable-warning=ExperimentalWarning packages/server/dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
