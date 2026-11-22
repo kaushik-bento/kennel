@@ -55,6 +55,7 @@ export function logReady(config: KennelConfig): void {
   console.log(`[kennel] data dir: ${config.dataDir}`);
   console.log(`[kennel] max concurrent sessions: ${config.maxConcurrent}`);
   console.log(`[kennel] sandbox backend: ${config.backend}`);
-  console.log("[kennel] Grok Bot connector (paste into a custom MCP connector):");
-  console.log(connectorLine(config));
+  // Never write the bearer token to stdout: under systemd it lands in the journal.
+  console.log("[kennel] Grok Bot connector (replace <KENNEL_TOKEN> with the token):");
+  console.log(connectorLine({ ...config, token: "<KENNEL_TOKEN>" }));
 }

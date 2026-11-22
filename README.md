@@ -125,7 +125,7 @@ npx kennel-mcp
 
 Tools: `create_session`, `list_sessions`, `get_session`, `send_prompt`, `get_events` (pass `after` and `waitMs` to long-poll), `interrupt`, `stop`, `resume`, `finish_session`, `close_session`.
 
-In Grok Bot, add a custom connector either as a remote MCP server (`http://<host>:8787/mcp` plus the bearer header from the startup log) or as the stdio command `npx kennel-mcp` with `KENNEL_URL` and `KENNEL_TOKEN`.
+In Grok Bot, add a custom connector either as a remote MCP server (`http://<host>:8787/mcp` plus `Authorization: Bearer $KENNEL_TOKEN`; the startup log prints the connector shape with the token redacted) or as the stdio command `npx kennel-mcp` with `KENNEL_URL` and `KENNEL_TOKEN`.
 
 ## Security
 
