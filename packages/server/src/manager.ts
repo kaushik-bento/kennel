@@ -41,6 +41,7 @@ export class SessionManager implements KennelApi {
   private readonly live = new Map<string, LiveSession>();
 
   private readonly idleTimers = new Map<string, NodeJS.Timeout>();
+  private readonly releasing = new Map<string, Promise<void>>();
 
   constructor(
     private readonly db: KennelDb,
@@ -68,7 +69,10 @@ export class SessionManager implements KennelApi {
     this.idleTimers.clear();
     const agents = [...this.live.values()];
     this.live.clear();
-    await Promise.all(agents.map((entry) => this.releaseLive(entry)));
+    await Promise.all([
+      ...agents.map((entry) => this.releaseLive(entry)),
+      ...[...this.releasing.values()].map((pending) => pending.catch(() => undefined)),
+    ]);
   }
 
   createSession(input: CreateSessionInput): Promise<SessionView> {
@@ -213,17 +217,15 @@ export class SessionManager implements KennelApi {
       this.cancelIdleRelease(id);
       this.db.cancelQueued(id);
       const live = this.live.get(id);
-      if (live?.turnActive && !live.provisioning) {
+      if (live) {
         live.stopRequested = true;
-        this.db.finishRunning(id, "interrupted");
-        this.db.setState(id, "stopped", null);
-        this.record(id, "status", { state: "stopped", queueDepth: 0 }, undefined);
-        await live.agent.interrupt().catch(() => undefined);
-        return this.view(this.require(id));
+        if (live.turnActive && !live.provisioning) {
+          await live.agent.interrupt().catch(() => undefined);
+        }
       }
-      if (live) live.stopRequested = true;
       this.db.finishRunning(id, "interrupted");
       await this.release(id, "stopped", null);
+      void this.pumpMany([]);
       return this.view(this.require(id));
     });
   }
@@ -236,8 +238,8 @@ export class SessionManager implements KennelApi {
       if (live && !live.exited && live.turnActive && !live.stopRequested) return this.view(session);
       if (live) {
         this.live.delete(id);
-        await this.releaseLive(live);
         this.db.setSandboxId(id, null);
+        this.trackRelease(id, this.releaseLive(live));
       }
       if (session.state !== "stopped") this.db.requeueRunning(id);
       const queued = this.db.queueDepth(id);
@@ -258,6 +260,7 @@ export class SessionManager implements KennelApi {
       this.cancelIdleRelease(id);
       const live = this.live.get(id);
       if (live) await this.release(id, session.state, session.error);
+      await this.waitReleasing(id);
       const result = await this.backend.finish(this.require(id), {
         commitMessage: input.commitMessage,
         openPr: input.openPr !== false,
@@ -277,8 +280,10 @@ export class SessionManager implements KennelApi {
       if (live) {
         live.stopRequested = true;
         this.live.delete(id);
-        await this.releaseLive(live);
+        this.db.setSandboxId(id, null);
+        this.trackRelease(id, this.releaseLive(live));
       }
+      await this.waitReleasing(id);
       this.db.requeueRunning(id);
       this.db.cancelQueued(id);
       this.db.markDeleted(id);
@@ -415,6 +420,8 @@ export class SessionManager implements KennelApi {
       };
       this.live.set(sessionId, placeholder);
       try {
+        await this.waitReleasing(sessionId);
+        if (this.live.get(sessionId) !== placeholder || placeholder.stopRequested) return;
         const conn = await this.backend.acquire(session);
         placeholder.conn = conn;
         if (this.live.get(sessionId) !== placeholder || placeholder.stopRequested) {
@@ -509,7 +516,7 @@ export class SessionManager implements KennelApi {
           live.exited = true;
           const conn = live.conn;
           this.live.delete(sessionId);
-          void conn.release().catch(() => undefined);
+          this.trackRelease(sessionId, conn.release().catch(() => undefined));
         }
         this.db.setSandboxId(sessionId, null);
         const message = String(event.data.error ?? "agent process exited");
@@ -524,9 +531,16 @@ export class SessionManager implements KennelApi {
       const queuedCount = this.db.queueDepth(sessionId);
       const plan = planAfterTurn({ stopRequested: false, queuedCount });
       if (!plan.startNext) {
+        if (plan.state === "idle" && this.config.sandboxIdleMs <= 0) {
+          if (live) {
+            this.live.delete(sessionId);
+            this.trackRelease(sessionId, this.releaseLive(live));
+          }
+          this.db.setSandboxId(sessionId, null);
+        }
         this.db.setState(sessionId, plan.state, null);
         this.record(sessionId, "status", { state: plan.state, queueDepth: queuedCount }, undefined);
-        if (plan.state === "idle") this.scheduleIdleRelease(sessionId);
+        if (plan.state === "idle" && this.config.sandboxIdleMs > 0) this.scheduleIdleRelease(sessionId);
         void this.pumpMany([]);
         return;
       }
@@ -534,8 +548,12 @@ export class SessionManager implements KennelApi {
       return;
     }
     if (event.type === "error" && event.data.fatal && !live?.turnActive) {
-      if (live) live.exited = true;
-      this.live.delete(sessionId);
+      if (live) {
+        live.exited = true;
+        this.live.delete(sessionId);
+        this.trackRelease(sessionId, this.releaseLive(live));
+      }
+      this.db.setSandboxId(sessionId, null);
       const message = String(event.data.message ?? "agent process exited");
       this.db.setState(sessionId, "error", message);
       this.record(sessionId, "error", event.data, event.raw);
@@ -549,10 +567,26 @@ export class SessionManager implements KennelApi {
     this.cancelIdleRelease(sessionId);
     const live = this.live.get(sessionId);
     this.live.delete(sessionId);
-    if (live) await this.releaseLive(live);
     this.db.setSandboxId(sessionId, null);
+    if (live) this.trackRelease(sessionId, this.releaseLive(live));
     this.db.setState(sessionId, state, error);
     this.record(sessionId, "status", { state, queueDepth: this.db.queueDepth(sessionId), detail: error }, undefined);
+  }
+
+  private trackRelease(sessionId: string, work: Promise<void>): void {
+    const prev = this.releasing.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .catch(() => undefined)
+      .then(() => work.catch(() => undefined))
+      .finally(() => {
+        if (this.releasing.get(sessionId) === next) this.releasing.delete(sessionId);
+      });
+    this.releasing.set(sessionId, next);
+  }
+
+  private async waitReleasing(sessionId: string): Promise<void> {
+    const pending = this.releasing.get(sessionId);
+    if (pending) await pending.catch(() => undefined);
   }
 
   private async releaseLive(live: LiveSession): Promise<void> {
