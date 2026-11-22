@@ -2,6 +2,8 @@ import { z } from "zod";
 import {
   AGENT_KINDS,
   APPROVAL_POLICIES,
+  ATTENTION_SEVERITIES,
+  KENNEL_EVENT_TYPES,
   PERMISSION_MODES,
   SANDBOX_MODES,
 } from "./types.js";
@@ -46,5 +48,16 @@ export const getEventsSchema = z
     sessionId: z.string().min(1),
     after: z.number().int().nonnegative().optional(),
     waitMs: z.number().int().nonnegative().max(60_000).optional(),
+    includeRaw: z.boolean().optional(),
+    types: z.array(z.enum(KENNEL_EVENT_TYPES)).optional(),
+    limit: z.number().int().positive().max(500).optional(),
+  })
+  .strict();
+
+export const listFlagsSchema = z
+  .object({
+    sessionId: z.string().min(1).optional(),
+    unacknowledgedOnly: z.boolean().optional(),
+    minSeverity: z.enum(ATTENTION_SEVERITIES).optional(),
   })
   .strict();

@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { SandboxMode } from "@kennel/core";
+import { agentEnv } from "../agent-env.js";
 import type { AgentAdapter, AgentEvent, AgentStartOptions, RunningAgent } from "./types.js";
 
 export interface CodexProcess {
@@ -373,7 +374,7 @@ function defaultSpawn(bin: string, cwd: string): CodexProcess {
   const child: ChildProcessWithoutNullStreams = spawn(bin, ["app-server"], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
-    env: process.env,
+    env: agentEnv(),
   });
   return child;
 }

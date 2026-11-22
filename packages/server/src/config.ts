@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { SandboxBackendKind } from "@kennel/core";
+import type { SandboxBackendKind, TriageMode } from "@kennel/core";
 
 export interface KennelConfig {
   token: string;
@@ -23,6 +23,13 @@ export interface KennelConfig {
   modalEnvironment?: string;
   /** Hard lifetime for a sandbox. Modal's own default is 5 minutes, which is too short for a coding turn. */
   modalSandboxTimeoutMs: number;
+  /** idle: triage when the queue drains, on a failed/interrupted turn, or on a local heuristic. */
+  triageMode: TriageMode;
+  triageModel: string;
+  /** Present only when XAI_API_KEY is set. Never logged and never sent to a sandbox. */
+  xaiApiKey?: string;
+  attentionWebhook?: string;
+  xaiEndpoint?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
@@ -56,6 +63,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
   if (!Number.isFinite(modalSandboxTimeoutMs) || modalSandboxTimeoutMs < 60_000) {
     throw new Error(`invalid KENNEL_MODAL_SANDBOX_TIMEOUT_MS: ${env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS}`);
   }
+  const triageMode = env.KENNEL_TRIAGE_MODE || "idle";
+  if (triageMode !== "idle" && triageMode !== "every_turn" && triageMode !== "off") {
+    throw new Error(`invalid KENNEL_TRIAGE_MODE: ${triageMode} (expected idle, every_turn, or off)`);
+  }
   const dataDir = path.resolve(env.KENNEL_DATA_DIR ?? path.join(os.homedir(), ".kennel"));
   mkdirSync(dataDir, { recursive: true });
   const config: KennelConfig = {
@@ -72,7 +83,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
     modalImage: env.KENNEL_MODAL_IMAGE || "kennel-agent",
     modalSecret: env.KENNEL_MODAL_SECRET || "kennel-agent",
     modalSandboxTimeoutMs,
+    triageMode,
+    triageModel: env.KENNEL_TRIAGE_MODEL || "grok-4.3",
   };
+  if (env.XAI_API_KEY) config.xaiApiKey = env.XAI_API_KEY;
+  if (env.KENNEL_ATTENTION_WEBHOOK) config.attentionWebhook = env.KENNEL_ATTENTION_WEBHOOK;
   if (env.KENNEL_PUBLIC_URL) config.publicUrl = env.KENNEL_PUBLIC_URL;
   const modalEnvironment = env.KENNEL_MODAL_ENVIRONMENT || env.MODAL_ENVIRONMENT;
   if (modalEnvironment) config.modalEnvironment = modalEnvironment;

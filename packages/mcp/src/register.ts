@@ -114,7 +114,7 @@ export function registerKennelTools(server: McpServer, api: KennelApi): void {
     {
       title: "Get events",
       description:
-        "Read the normalized event log for a session after a cursor. Pass the previous response's cursor, or 0 to start from the beginning. Events are message_delta, tool_call, tool_result, turn_completed (includes status and token usage), error, and status. Set waitMs to long-poll until a new event arrives or the wait expires (maximum 60000). Use this to follow a turn when you cannot hold an SSE connection. The returned cursor is what you pass as after on the next call.",
+        "Read the normalized event log for a session after a cursor. Pass the previous response's cursor, or 0 to start from the beginning. Events are message_delta, tool_call, tool_result, turn_completed (includes status and token usage), error, status, and attention. The raw agent payload is omitted unless includeRaw is true. types filters to those event types, and the returned cursor is the last event actually returned so a filtered view does not reread the same page. limit defaults to 200 and cannot exceed 500. Set waitMs to long-poll until a matching event arrives or the wait expires (maximum 60000).",
       inputSchema: z.object({
         sessionId: z.string(),
         after: z.number().int().nonnegative().optional().describe("Return events with id greater than this cursor."),
@@ -124,14 +124,33 @@ export function registerKennelTools(server: McpServer, api: KennelApi): void {
           .nonnegative()
           .max(60_000)
           .optional()
-          .describe("Long-poll up to this many milliseconds when no event is waiting."),
+          .describe("Long-poll up to this many milliseconds when no matching event is waiting."),
+        includeRaw: z.boolean().optional().describe("Include the raw agent payload. Defaults to false."),
+        types: z
+          .array(
+            z.enum([
+              "message_delta",
+              "tool_call",
+              "tool_result",
+              "turn_completed",
+              "error",
+              "status",
+              "attention",
+            ]),
+          )
+          .optional()
+          .describe("Return only these event types."),
+        limit: z.number().int().positive().max(500).optional().describe("Maximum events to return. Defaults to 200."),
       }),
     },
-    async ({ sessionId, after, waitMs }) =>
+    async ({ sessionId, after, waitMs, includeRaw, types, limit }) =>
       run(() =>
         api.getEvents(sessionId, {
           ...(after !== undefined ? { after } : {}),
           ...(waitMs !== undefined ? { waitMs } : {}),
+          ...(includeRaw !== undefined ? { includeRaw } : {}),
+          ...(types !== undefined ? { types } : {}),
+          ...(limit !== undefined ? { limit } : {}),
         }),
       ),
   );
@@ -203,5 +222,63 @@ export function registerKennelTools(server: McpServer, api: KennelApi): void {
     },
     async ({ sessionId, cleanup }) =>
       run(() => api.closeSession(sessionId, cleanup === undefined ? {} : { cleanup })),
+  );
+
+  server.registerTool(
+    "list_flags",
+    {
+      title: "List attention flags",
+      description:
+        "List attention flags raised when triage decided a person should look. unacknowledgedOnly defaults to true. minSeverity is info, warn, or urgent. Filter to one session with sessionId.",
+      inputSchema: z.object({
+        sessionId: z.string().optional(),
+        unacknowledgedOnly: z.boolean().optional().describe("Only flags that have not been acknowledged. Defaults to true."),
+        minSeverity: z.enum(["info", "warn", "urgent"]).optional(),
+      }),
+    },
+    async ({ sessionId, unacknowledgedOnly, minSeverity }) =>
+      run(() =>
+        api.listFlags({
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          ...(unacknowledgedOnly !== undefined ? { unacknowledgedOnly } : {}),
+          ...(minSeverity !== undefined ? { minSeverity } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "ack_flag",
+    {
+      title: "Acknowledge flag",
+      description: "Mark an attention flag as acknowledged so it drops out of the default flag list and the digest.",
+      inputSchema: z.object({ id: z.string().describe("Flag id.") }),
+    },
+    async ({ id }) => run(() => api.ackFlag(id)),
+  );
+
+  server.registerTool(
+    "get_summaries",
+    {
+      title: "Get batch summaries",
+      description:
+        "Read triage batch summaries for a session, newest first. Each summary covers the turns since the previous triage and records fromPromptId and toPromptId.",
+      inputSchema: z.object({
+        sessionId: z.string(),
+        limit: z.number().int().positive().max(100).optional().describe("How many summaries to return. Defaults to 20."),
+      }),
+    },
+    async ({ sessionId, limit }) =>
+      run(() => api.getSummaries(sessionId, limit === undefined ? {} : { limit })),
+  );
+
+  server.registerTool(
+    "digest",
+    {
+      title: "Session digest",
+      description:
+        "One row per live session: id, repo, agent, state, the rolling session summary, the count of open flags, and the highest open severity. Sorted urgent, warn, info, then none, and by open flag count within a severity.",
+      inputSchema: z.object({}),
+    },
+    async () => run(() => api.digest()),
   );
 }

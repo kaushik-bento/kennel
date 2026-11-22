@@ -1,5 +1,16 @@
 import { DatabaseSync } from "node:sqlite";
-import type { AgentKind, KennelEvent, KennelEventType, Permissions, SandboxBackendKind, SessionState } from "@kennel/core";
+import type {
+  AgentKind,
+  AttentionReason,
+  AttentionSeverity,
+  FlagView,
+  KennelEvent,
+  KennelEventType,
+  Permissions,
+  SandboxBackendKind,
+  SessionState,
+  SummaryView,
+} from "@kennel/core";
 
 const originalEmitWarning = process.emitWarning.bind(process);
 process.emitWarning = ((warning: unknown, ...args: unknown[]) => {
@@ -24,6 +35,8 @@ export interface SessionRow {
   model: string | null;
   permissions: Permissions;
   error: string | null;
+  sessionSummary: string | null;
+  triageEventCursor: number;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -54,6 +67,8 @@ interface SessionSql {
   model: string | null;
   permissions_json: string;
   error: string | null;
+  session_summary: string | null;
+  triage_event_cursor: number | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -76,6 +91,8 @@ function mapSession(row: SessionSql): SessionRow {
     model: row.model,
     permissions: JSON.parse(row.permissions_json) as Permissions,
     error: row.error,
+    sessionSummary: row.session_summary,
+    triageEventCursor: Number(row.triage_event_cursor ?? 0),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -142,7 +159,30 @@ export class KennelDb {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS events_session_id ON events(session_id, id);
+      CREATE TABLE IF NOT EXISTS flags (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_id TEXT,
+        severity TEXT NOT NULL,
+        reasons_json TEXT NOT NULL,
+        suggested_action TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        acknowledged_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS flags_session ON flags(session_id, created_at);
+      CREATE TABLE IF NOT EXISTS summaries (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        from_prompt_id TEXT,
+        to_prompt_id TEXT,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS summaries_session ON summaries(session_id, created_at);
     `);
+    ensureColumn(db, "sessions", "session_summary", "TEXT");
+    ensureColumn(db, "sessions", "triage_event_cursor", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "prompts", "triaged", "INTEGER NOT NULL DEFAULT 0");
     return new KennelDb(db);
   }
 
@@ -338,13 +378,22 @@ export class KennelDb {
     return event;
   }
 
-  eventsAfter(sessionId: string, after: number, limit: number): KennelEvent[] {
+  eventsAfter(
+    sessionId: string,
+    after: number,
+    limit: number,
+    opts?: { types?: KennelEventType[]; includeRaw?: boolean },
+  ): KennelEvent[] {
+    const includeRaw = opts?.includeRaw !== false;
+    const types = opts?.types?.filter((type) => type.length > 0) ?? [];
+    const typeClause = types.length > 0 ? ` AND type IN (${types.map(() => "?").join(",")})` : "";
+    const rawColumn = includeRaw ? "raw_json" : "NULL AS raw_json";
     const rows = this.db
       .prepare(
-        `SELECT id, session_id, type, data_json, raw_json, created_at FROM events
-         WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+        `SELECT id, session_id, type, data_json, ${rawColumn}, created_at FROM events
+         WHERE session_id = ? AND id > ?${typeClause} ORDER BY id ASC LIMIT ?`,
       )
-      .all(sessionId, after, limit) as unknown as Array<{
+      .all(sessionId, after, ...types, limit) as unknown as Array<{
       id: number;
       session_id: string;
       type: KennelEventType;
@@ -363,5 +412,156 @@ export class KennelDb {
       if (row.raw_json) event.raw = JSON.parse(row.raw_json) as unknown;
       return event;
     });
+  }
+
+  latestEventId(sessionId: string): number {
+    const row = this.db.prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM events WHERE session_id = ?`).get(sessionId) as {
+      n: number;
+    };
+    return Number(row.n);
+  }
+
+  untriagedPrompts(sessionId: string): Array<{ id: string; text: string; status: string; position: number }> {
+    return this.db
+      .prepare(
+        `SELECT id, text, status, position FROM prompts
+         WHERE session_id = ? AND triaged = 0 AND status IN ('done', 'interrupted', 'error')
+         ORDER BY position ASC`,
+      )
+      .all(sessionId) as unknown as Array<{ id: string; text: string; status: string; position: number }>;
+  }
+
+  markPromptsTriaged(ids: string[]): void {
+    if (ids.length === 0) return;
+    const stmt = this.db.prepare(`UPDATE prompts SET triaged = 1 WHERE id = ?`);
+    for (const id of ids) stmt.run(id);
+  }
+
+  setTriageCursor(sessionId: string, cursor: number): void {
+    this.db.prepare(`UPDATE sessions SET triage_event_cursor = ?, updated_at = ? WHERE id = ?`).run(cursor, new Date().toISOString(), sessionId);
+  }
+
+  setSessionSummary(sessionId: string, summary: string): void {
+    this.db.prepare(`UPDATE sessions SET session_summary = ?, updated_at = ? WHERE id = ?`).run(summary, new Date().toISOString(), sessionId);
+  }
+
+  insertSummary(row: SummaryView): void {
+    this.db
+      .prepare(
+        `INSERT INTO summaries (id, session_id, from_prompt_id, to_prompt_id, summary, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.id, row.sessionId, row.fromPromptId, row.toPromptId, row.summary, row.createdAt);
+  }
+
+  listSummaries(sessionId: string, limit: number): SummaryView[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, session_id, from_prompt_id, to_prompt_id, summary, created_at FROM summaries
+         WHERE session_id = ? ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(sessionId, limit) as unknown as Array<{
+      id: string;
+      session_id: string;
+      from_prompt_id: string | null;
+      to_prompt_id: string | null;
+      summary: string;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      fromPromptId: row.from_prompt_id,
+      toPromptId: row.to_prompt_id,
+      summary: row.summary,
+      createdAt: row.created_at,
+    }));
+  }
+
+  latestSummary(sessionId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT summary FROM summaries WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(sessionId) as { summary: string } | undefined;
+    return row?.summary ?? null;
+  }
+
+  insertFlag(row: FlagView): void {
+    this.db
+      .prepare(
+        `INSERT INTO flags (id, session_id, prompt_id, severity, reasons_json, suggested_action, created_at, acknowledged_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(row.id, row.sessionId, row.promptId, row.severity, JSON.stringify(row.reasons), row.suggestedAction, row.createdAt);
+  }
+
+  listFlags(opts: { sessionId?: string; unacknowledgedOnly?: boolean; minSeverity?: AttentionSeverity }): FlagView[] {
+    const where: string[] = [];
+    const args: Array<string | number> = [];
+    if (opts.sessionId) {
+      where.push("session_id = ?");
+      args.push(opts.sessionId);
+    }
+    if (opts.unacknowledgedOnly) where.push("acknowledged_at IS NULL");
+    const sql = `SELECT * FROM flags ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC`;
+    const rows = this.db.prepare(sql).all(...args) as unknown as FlagSql[];
+    const min = opts.minSeverity ? SEVERITY_RANK[opts.minSeverity] : 0;
+    return rows.map(mapFlag).filter((flag) => SEVERITY_RANK[flag.severity] >= min);
+  }
+
+  ackFlag(id: string): FlagView | undefined {
+    const now = new Date().toISOString();
+    this.db.prepare(`UPDATE flags SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL`).run(now, id);
+    const row = this.db.prepare(`SELECT * FROM flags WHERE id = ?`).get(id) as FlagSql | undefined;
+    return row ? mapFlag(row) : undefined;
+  }
+
+  countOpenFlags(sessionId: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM flags WHERE session_id = ? AND acknowledged_at IS NULL`)
+      .get(sessionId) as { n: number };
+    return Number(row.n);
+  }
+
+  highestOpenSeverity(sessionId: string): AttentionSeverity | null {
+    const rows = this.db
+      .prepare(`SELECT severity FROM flags WHERE session_id = ? AND acknowledged_at IS NULL`)
+      .all(sessionId) as unknown as Array<{ severity: AttentionSeverity }>;
+    let best: AttentionSeverity | null = null;
+    for (const row of rows) {
+      if (!best || SEVERITY_RANK[row.severity] > SEVERITY_RANK[best]) best = row.severity;
+    }
+    return best;
+  }
+}
+
+const SEVERITY_RANK: Record<AttentionSeverity, number> = { info: 1, warn: 2, urgent: 3 };
+
+interface FlagSql {
+  id: string;
+  session_id: string;
+  prompt_id: string | null;
+  severity: AttentionSeverity;
+  reasons_json: string;
+  suggested_action: string;
+  created_at: string;
+  acknowledged_at: string | null;
+}
+
+function mapFlag(row: FlagSql): FlagView {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    promptId: row.prompt_id,
+    severity: row.severity,
+    reasons: JSON.parse(row.reasons_json) as AttentionReason[],
+    suggestedAction: row.suggested_action,
+    createdAt: row.created_at,
+    acknowledgedAt: row.acknowledged_at,
+  };
+}
+
+function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
+  if (!cols.some((col) => col.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
   }
 }

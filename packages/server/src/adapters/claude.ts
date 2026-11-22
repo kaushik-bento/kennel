@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Options, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { agentEnv } from "../agent-env.js";
 import type { AgentAdapter, AgentEvent, AgentStartOptions, RunningAgent } from "./types.js";
 
 export interface ClaudeQuery extends AsyncIterable<unknown> {
@@ -102,6 +103,8 @@ export class ClaudeAdapter implements AgentAdapter {
       cwd: options.cwd,
       includePartialMessages: true,
       settingSources: ["project"],
+      // The SDK replaces the process environment, so pass a copy with triage secrets removed.
+      env: agentEnv(),
       stderr: (line) => {
         options.onEvent({ type: "error", data: { message: line, stream: "stderr" }, raw: line });
       },

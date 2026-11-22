@@ -4,16 +4,21 @@ import {
   planAfterTurn,
   planBootRecovery,
   planPrompt,
+  type AttentionSeverity,
   type CreateSessionInput,
+  type DigestEntry,
   type EventPage,
+  type EventQuery,
   type FinishInput,
   type FinishResult,
+  type FlagView,
   type KennelApi,
   type KennelEvent,
   type PromptResult,
   type SendPromptInput,
   type SessionState,
   type SessionView,
+  type SummaryView,
 } from "@kennel/core";
 import type { AgentEvent, RunningAgent } from "./adapters/types.js";
 import { Actor } from "./actor.js";
@@ -22,6 +27,9 @@ import type { KennelConfig } from "./config.js";
 import { KennelDb, type PromptRow, type SessionRow } from "./db.js";
 import { KennelError } from "./errors.js";
 import type { AgentConnection, SandboxBackend } from "./sandbox/index.js";
+import { finalAssistantText, heuristicHit, terminalTurn } from "./triage/heuristic.js";
+import { AttentionService } from "./triage/service.js";
+import { XaiClient } from "./triage/xai.js";
 
 interface LiveSession {
   agent: RunningAgent;
@@ -42,12 +50,28 @@ export class SessionManager implements KennelApi {
 
   private readonly idleTimers = new Map<string, NodeJS.Timeout>();
   private readonly releasing = new Map<string, Promise<void>>();
+  private readonly triageTail = new Map<string, Promise<void>>();
+  private readonly attention: AttentionService | null;
 
   constructor(
     private readonly db: KennelDb,
     private readonly backend: SandboxBackend,
     private readonly config: KennelConfig,
-  ) {}
+  ) {
+    this.attention =
+      config.xaiApiKey && config.triageMode !== "off"
+        ? new AttentionService(
+            db,
+            new XaiClient({
+              apiKey: config.xaiApiKey,
+              model: config.triageModel,
+              ...(config.xaiEndpoint ? { endpoint: config.xaiEndpoint } : {}),
+            }),
+            (sessionId, type, data) => this.record(sessionId, type, data, undefined),
+            config.attentionWebhook,
+          )
+        : null;
+  }
 
   recover(): void {
     for (const session of this.db.listActive()) {
@@ -105,6 +129,8 @@ export class SessionManager implements KennelApi {
         model: input.model ?? null,
         permissions: input.permissions ?? {},
         error: null,
+        sessionSummary: null,
+        triageEventCursor: 0,
         createdAt: now,
         updatedAt: now,
         deletedAt: null,
@@ -176,18 +202,17 @@ export class SessionManager implements KennelApi {
     });
   }
 
-  getEvents(id: string, opts: { after?: number; waitMs?: number }): Promise<EventPage> {
+  getEvents(id: string, opts: EventQuery): Promise<EventPage> {
     this.require(id);
-    const after = opts.after ?? 0;
-    const waitMs = Math.min(Math.max(opts.waitMs ?? 0, 0), 60_000);
-    return this.readEvents(id, after, waitMs);
+    return this.readEvents(id, opts);
   }
 
-  async *streamEvents(id: string, after: number, signal: AbortSignal): AsyncGenerator<KennelEvent> {
+  async *streamEvents(id: string, opts: EventQuery, signal: AbortSignal): AsyncGenerator<KennelEvent> {
     this.require(id);
-    let cursor = after;
+    let cursor = opts.after ?? 0;
+    const query = eventReadOptions(opts);
     while (!signal.aborted) {
-      const events = this.db.eventsAfter(id, cursor, 200);
+      const events = this.db.eventsAfter(id, cursor, query.limit, query);
       if (events.length > 0) {
         for (const event of events) {
           cursor = event.id;
@@ -197,6 +222,39 @@ export class SessionManager implements KennelApi {
       }
       await this.bus.wait(id, cursor, 15_000, signal);
     }
+  }
+
+  listFlags(opts: { sessionId?: string; unacknowledgedOnly?: boolean; minSeverity?: AttentionSeverity }): Promise<FlagView[]> {
+    if (opts.sessionId) this.require(opts.sessionId);
+    return Promise.resolve(this.db.listFlags({ ...opts, unacknowledgedOnly: opts.unacknowledgedOnly !== false }));
+  }
+
+  ackFlag(id: string): Promise<FlagView> {
+    const flag = this.db.ackFlag(id);
+    if (!flag) throw new KennelError(404, `flag not found: ${id}`);
+    return Promise.resolve(flag);
+  }
+
+  getSummaries(sessionId: string, opts?: { limit?: number }): Promise<SummaryView[]> {
+    this.require(sessionId);
+    const limit = Math.min(100, Math.max(1, opts?.limit ?? 20));
+    return Promise.resolve(this.db.listSummaries(sessionId, limit));
+  }
+
+  digest(): Promise<DigestEntry[]> {
+    const rank = (severity: DigestEntry["highestSeverity"]) =>
+      severity === "urgent" ? 3 : severity === "warn" ? 2 : severity === "info" ? 1 : 0;
+    const entries = this.db.listSessions().map((row) => ({
+      id: row.id,
+      repo: row.repo,
+      agent: row.agent,
+      state: row.state,
+      sessionSummary: row.sessionSummary,
+      openFlags: this.db.countOpenFlags(row.id),
+      highestSeverity: this.db.highestOpenSeverity(row.id),
+    }));
+    entries.sort((a, b) => rank(b.highestSeverity) - rank(a.highestSeverity) || b.openFlags - a.openFlags);
+    return Promise.resolve(entries);
   }
 
   interrupt(id: string): Promise<SessionView> {
@@ -292,14 +350,16 @@ export class SessionManager implements KennelApi {
     });
   }
 
-  private async readEvents(id: string, after: number, waitMs: number): Promise<EventPage> {
-    let events = this.db.eventsAfter(id, after, 200);
-    if (events.length === 0 && waitMs > 0) {
-      await this.bus.wait(id, after, waitMs);
-      events = this.db.eventsAfter(id, after, 200);
+  private async readEvents(id: string, opts: EventQuery): Promise<EventPage> {
+    const after = opts.after ?? 0;
+    const query = eventReadOptions(opts);
+    const deadline = Date.now() + Math.min(Math.max(opts.waitMs ?? 0, 0), 60_000);
+    let events = this.db.eventsAfter(id, after, query.limit, query);
+    while (events.length === 0 && Date.now() < deadline) {
+      await this.bus.wait(id, after, Math.max(1, deadline - Date.now()));
+      events = this.db.eventsAfter(id, after, query.limit, query);
     }
-    const cursor = events.at(-1)?.id ?? after;
-    return { events, cursor };
+    return { events, cursor: events.at(-1)?.id ?? after };
   }
 
   private require(id: string): SessionRow {
@@ -324,6 +384,9 @@ export class SessionManager implements KennelApi {
       error: row.error,
       backend: row.backend,
       sandboxId: row.sandboxId,
+      sessionSummary: row.sessionSummary,
+      lastBatchSummary: this.db.latestSummary(row.id),
+      openFlags: this.db.countOpenFlags(row.id),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
@@ -490,6 +553,7 @@ export class SessionManager implements KennelApi {
       this.record(sessionId, "error", { message, fatal: true }, undefined);
       this.record(sessionId, "turn_completed", { status: "failed", promptId, error: message }, undefined);
       this.record(sessionId, "status", { state: "error", detail: message }, undefined);
+      this.considerTriage(sessionId, "failed");
     }
   }
 
@@ -510,6 +574,7 @@ export class SessionManager implements KennelApi {
         live.currentPromptId = null;
       }
       this.record(sessionId, "turn_completed", { ...event.data, promptId }, event.raw);
+      this.considerTriage(sessionId, status);
       const processExited = Boolean(event.data.processExited);
       if (processExited) {
         if (live) {
@@ -621,4 +686,41 @@ export class SessionManager implements KennelApi {
     clearTimeout(timer);
     this.idleTimers.delete(sessionId);
   }
+
+  /**
+   * Decide whether this turn starts a triage. The xAI call runs off the actor lock,
+   * serialized per session, and covers every finished prompt since the last success.
+   */
+  private considerTriage(sessionId: string, status: string): void {
+    if (!this.attention || this.config.triageMode === "off") return;
+    const live = this.live.get(sessionId);
+    const goingIdle = this.db.queueDepth(sessionId) === 0 && !live?.turnActive && !live?.stopRequested;
+    const immediate = terminalTurn(status) || this.assistantAsks(sessionId);
+    const everyTurn = this.config.triageMode === "every_turn";
+    if (!immediate && !everyTurn && !(this.config.triageMode === "idle" && goingIdle)) return;
+    const prev = this.triageTail.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .catch(() => undefined)
+      .then(() => this.attention?.review(sessionId))
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[kennel] triage_error session=${sessionId}: ${message}`);
+      });
+    this.triageTail.set(sessionId, next);
+  }
+
+  private assistantAsks(sessionId: string): boolean {
+    const latest = this.db.latestEventId(sessionId);
+    const recent = this.db.eventsAfter(sessionId, Math.max(0, latest - 80), 80, { includeRaw: false });
+    return heuristicHit(finalAssistantText(recent));
+  }
+}
+
+function eventReadOptions(opts: EventQuery): { limit: number; types?: EventQuery["types"]; includeRaw: boolean } {
+  const requested = opts.limit ?? 200;
+  return {
+    limit: Math.min(500, Math.max(1, Math.floor(requested))),
+    ...(opts.types && opts.types.length > 0 ? { types: opts.types } : {}),
+    includeRaw: opts.includeRaw === true,
+  };
 }

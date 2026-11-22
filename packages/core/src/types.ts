@@ -52,17 +52,90 @@ export interface SessionView {
   backend: SandboxBackendKind;
   /** Modal sandbox id while one is running. Null on the local backend and after an idle shutdown. */
   sandboxId: string | null;
+  /** Rolling summary of the whole session. Null until the first triage. */
+  sessionSummary: string | null;
+  /** Latest triage batch summary. Null until the first triage. */
+  lastBatchSummary: string | null;
+  /** Unacknowledged attention flags. */
+  openFlags: number;
   createdAt: string;
   updatedAt: string;
 }
 
-export type KennelEventType =
-  | "message_delta"
-  | "tool_call"
-  | "tool_result"
-  | "turn_completed"
-  | "error"
-  | "status";
+export const KENNEL_EVENT_TYPES = [
+  "message_delta",
+  "tool_call",
+  "tool_result",
+  "turn_completed",
+  "error",
+  "status",
+  "attention",
+] as const;
+
+export type KennelEventType = (typeof KENNEL_EVENT_TYPES)[number];
+
+export const ATTENTION_SEVERITIES = ["info", "warn", "urgent"] as const;
+export type AttentionSeverity = (typeof ATTENTION_SEVERITIES)[number];
+
+export const ATTENTION_KINDS = [
+  "agent_question",
+  "blocked",
+  "stuck_or_looping",
+  "tests_failing",
+  "risky_action",
+  "claimed_done_unverified",
+  "scope_drift",
+  "error",
+] as const;
+export type AttentionKind = (typeof ATTENTION_KINDS)[number];
+
+export const TRIAGE_MODES = ["idle", "every_turn", "off"] as const;
+export type TriageMode = (typeof TRIAGE_MODES)[number];
+
+export interface AttentionReason {
+  kind: AttentionKind;
+  summary: string;
+  evidence: string;
+}
+
+export interface FlagView {
+  id: string;
+  sessionId: string;
+  promptId: string | null;
+  severity: AttentionSeverity;
+  reasons: AttentionReason[];
+  suggestedAction: string;
+  createdAt: string;
+  acknowledgedAt: string | null;
+}
+
+export interface SummaryView {
+  id: string;
+  sessionId: string;
+  fromPromptId: string | null;
+  toPromptId: string | null;
+  summary: string;
+  createdAt: string;
+}
+
+export interface DigestEntry {
+  id: string;
+  repo: string;
+  agent: AgentKind;
+  state: SessionState;
+  sessionSummary: string | null;
+  openFlags: number;
+  highestSeverity: AttentionSeverity | null;
+}
+
+export interface EventQuery {
+  after?: number;
+  waitMs?: number;
+  /** Include the raw agent payload. Default false. */
+  includeRaw?: boolean;
+  types?: KennelEventType[];
+  limit?: number;
+}
 
 export interface KennelEvent {
   id: number;
@@ -121,10 +194,14 @@ export interface KennelApi {
   listSessions(): Promise<SessionView[]>;
   getSession(id: string): Promise<SessionView>;
   sendPrompt(id: string, input: SendPromptInput): Promise<PromptResult>;
-  getEvents(id: string, opts: { after?: number; waitMs?: number }): Promise<EventPage>;
+  getEvents(id: string, opts: EventQuery): Promise<EventPage>;
   interrupt(id: string): Promise<SessionView>;
   stop(id: string): Promise<SessionView>;
   resume(id: string): Promise<SessionView>;
   finishSession(id: string, input: FinishInput): Promise<FinishResult>;
   closeSession(id: string, opts?: { cleanup?: boolean }): Promise<{ deleted: true; cleanup: boolean }>;
+  listFlags(opts: { sessionId?: string; unacknowledgedOnly?: boolean; minSeverity?: AttentionSeverity }): Promise<FlagView[]>;
+  ackFlag(id: string): Promise<FlagView>;
+  getSummaries(sessionId: string, opts?: { limit?: number }): Promise<SummaryView[]>;
+  digest(): Promise<DigestEntry[]>;
 }

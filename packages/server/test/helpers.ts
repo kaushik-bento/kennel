@@ -54,6 +54,10 @@ export async function startApp(options?: {
   backend?: SandboxBackendKind;
   sandboxIdleMs?: number;
   modalHost?: ModalHost;
+  triageMode?: KennelConfig["triageMode"];
+  xaiApiKey?: string;
+  xaiEndpoint?: string;
+  attentionWebhook?: string;
 }): Promise<RunningApp> {
   const dataDir = options?.dataDir ?? (await mkdtemp(path.join(tmpdir(), "kennel-data-")));
   await mkdir(dataDir, { recursive: true });
@@ -72,6 +76,11 @@ export async function startApp(options?: {
     modalImage: "kennel-agent",
     modalSecret: "kennel-agent",
     modalSandboxTimeoutMs: 60_000,
+    triageMode: options?.triageMode ?? "off",
+    triageModel: "grok-4.3",
+    ...(options?.xaiApiKey ? { xaiApiKey: options.xaiApiKey } : {}),
+    ...(options?.xaiEndpoint ? { xaiEndpoint: options.xaiEndpoint } : {}),
+    ...(options?.attentionWebhook ? { attentionWebhook: options.attentionWebhook } : {}),
   };
   const app = await createKennel({
     config,

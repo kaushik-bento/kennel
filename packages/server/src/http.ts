@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { bearerAuthorized } from "@kennel/core";
+import { ATTENTION_SEVERITIES, bearerAuthorized, KENNEL_EVENT_TYPES, type AttentionSeverity, type EventQuery, type KennelEventType } from "@kennel/core";
 import { createSessionSchema, finishSchema, sendPromptSchema } from "@kennel/core";
 import type { KennelConfig } from "./config.js";
 import { KennelError } from "./errors.js";
@@ -49,6 +49,31 @@ async function handle(
       send(res, 200, { sessions: await manager.listSessions() });
       return;
     }
+    if (method === "GET" && path === "/flags") {
+      const sessionId = url.searchParams.get("sessionId") ?? undefined;
+      const unacknowledgedOnly = url.searchParams.get("unacknowledged") !== "false";
+      const min = url.searchParams.get("minSeverity");
+      if (min && !ATTENTION_SEVERITIES.includes(min as AttentionSeverity)) {
+        return send(res, 400, { error: "invalid minSeverity" });
+      }
+      send(res, 200, {
+        flags: await manager.listFlags({
+          ...(sessionId ? { sessionId } : {}),
+          unacknowledgedOnly,
+          ...(min ? { minSeverity: min as AttentionSeverity } : {}),
+        }),
+      });
+      return;
+    }
+    if (method === "GET" && path === "/digest") {
+      send(res, 200, { sessions: await manager.digest() });
+      return;
+    }
+    const flagAck = /^\/flags\/([^/]+)\/ack$/.exec(path);
+    if (method === "POST" && flagAck?.[1]) {
+      send(res, 200, await manager.ackFlag(decodeURIComponent(flagAck[1])));
+      return;
+    }
 
     const sessionMatch = /^\/sessions\/([^/]+)$/.exec(path);
     const nested = /^\/sessions\/([^/]+)\/([^/]+)$/.exec(path);
@@ -74,16 +99,21 @@ async function handle(
       return;
     }
     if (method === "GET" && action === "events") {
-      const after = parseAfter(url, req);
+      const query = eventQuery(url, req);
+      if (typeof query === "string") return send(res, 400, { error: query });
       const accept = req.headers.accept ?? "";
       const wantsJson = accept.includes("application/json") && !accept.includes("text/event-stream");
       if (wantsJson) {
-        const waitMs = Number(url.searchParams.get("waitMs") ?? "0");
-        if (!Number.isFinite(waitMs) || waitMs < 0) return send(res, 400, { error: "invalid waitMs" });
-        send(res, 200, await manager.getEvents(id, { after, waitMs }));
+        send(res, 200, await manager.getEvents(id, query));
         return;
       }
-      await writeSse(manager, id, after, req, res);
+      await writeSse(manager, id, query, req, res);
+      return;
+    }
+    if (method === "GET" && action === "summaries") {
+      const limit = Number(url.searchParams.get("limit") ?? "20");
+      if (!Number.isFinite(limit) || limit < 1) return send(res, 400, { error: "invalid limit" });
+      send(res, 200, { summaries: await manager.getSummaries(id, { limit }) });
       return;
     }
     if (method === "POST" && action === "interrupt") {
@@ -130,10 +160,39 @@ function parseAfter(url: URL, req: IncomingMessage): number {
   return after;
 }
 
+function eventQuery(url: URL, req: IncomingMessage): EventQuery | string {
+  const after = parseAfter(url, req);
+  const waitRaw = url.searchParams.get("waitMs") ?? "0";
+  const waitMs = Number(waitRaw);
+  if (!Number.isFinite(waitMs) || waitMs < 0) return "invalid waitMs";
+  const typesRaw = url.searchParams.get("types");
+  let types: KennelEventType[] | undefined;
+  if (typesRaw) {
+    const parts = typesRaw.split(",").map((part) => part.trim()).filter(Boolean);
+    for (const part of parts) {
+      if (!KENNEL_EVENT_TYPES.includes(part as KennelEventType)) return `unknown event type: ${part}`;
+    }
+    types = parts as KennelEventType[];
+  }
+  const limitRaw = url.searchParams.get("limit");
+  let limit: number | undefined;
+  if (limitRaw !== null) {
+    limit = Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) return "invalid limit";
+  }
+  return {
+    after,
+    waitMs,
+    includeRaw: url.searchParams.get("raw") === "1",
+    ...(types ? { types } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+  };
+}
+
 async function writeSse(
   manager: SessionManager,
   id: string,
-  after: number,
+  query: EventQuery,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
@@ -148,7 +207,7 @@ async function writeSse(
   req.on("close", abort);
   res.write(": connected\n\n");
   try {
-    for await (const event of manager.streamEvents(id, after, controller.signal)) {
+    for await (const event of manager.streamEvents(id, query, controller.signal)) {
       res.write(`id: ${event.id}\n`);
       res.write(`event: ${event.type}\n`);
       res.write(`data: ${JSON.stringify(event)}\n\n`);

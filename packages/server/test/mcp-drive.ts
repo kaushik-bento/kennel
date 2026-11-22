@@ -22,12 +22,16 @@ await httpClient.connect(
 const listed = await httpClient.listTools();
 const names = listed.tools.map((tool) => tool.name).sort();
 const expected = [
+  "ack_flag",
   "close_session",
   "create_session",
+  "digest",
   "finish_session",
   "get_events",
   "get_session",
+  "get_summaries",
   "interrupt",
+  "list_flags",
   "list_sessions",
   "resume",
   "send_prompt",

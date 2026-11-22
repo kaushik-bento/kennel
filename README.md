@@ -79,9 +79,13 @@ Every route requires `Authorization: Bearer $KENNEL_TOKEN`. The comparison is a 
 | --- | --- | --- |
 | `POST` | `/sessions` | `{repo, baseBranch, agent: "claude"\|"codex"\|"echo", permissions?, model?}` |
 | `GET` | `/sessions` | |
-| `GET` | `/sessions/:id` | state `idle\|running\|queued\|stopped\|error`, queue depth, branch, worktree path, native id, backend, sandbox id |
+| `GET` | `/sessions/:id` | state `idle\|running\|queued\|stopped\|error`, queue depth, branch, worktree path, native id, backend, sandbox id, `sessionSummary`, `lastBatchSummary`, `openFlags` |
 | `POST` | `/sessions/:id/prompts` | `{text, mode: "queue"\|"steer"}` |
-| `GET` | `/sessions/:id/events` | SSE. `?after=` or `Last-Event-ID` replays. `Accept: application/json` plus `?waitMs=` long-polls |
+| `GET` | `/sessions/:id/events` | SSE. `?after=` or `Last-Event-ID` replays. `?types=tool_call,error` filters. `?limit=` defaults to 200 (max 500). `?raw=1` includes the agent payload. `Accept: application/json` plus `?waitMs=` long-polls |
+| `GET` | `/sessions/:id/summaries` | triage batch summaries, newest first. `?limit=` |
+| `GET` | `/flags` | attention flags. `?sessionId=`, `?unacknowledged=false`, `?minSeverity=warn` |
+| `POST` | `/flags/:id/ack` | mark a flag acknowledged |
+| `GET` | `/digest` | every live session with its summary and open flags |
 | `POST` | `/sessions/:id/interrupt` | stop the current turn, keep the queue |
 | `POST` | `/sessions/:id/stop` | interrupt and clear the queue |
 | `POST` | `/sessions/:id/resume` | start the worker again on the same native session id |
@@ -92,7 +96,17 @@ Every route requires `Authorization: Bearer $KENNEL_TOKEN`. The comparison is a 
 
 `queue` appends to a FIFO. An idle session starts the turn when a concurrency slot is free (`KENNEL_MAX_CONCURRENT`, default 4); otherwise the session state becomes `queued`. `steer` injects into the in-flight turn: Codex `turn/steer`, or a Claude streaming user message with `priority: "now"` and `origin.kind: "human"`. If nothing is running, `steer` starts a turn.
 
-Events are monotonic per database and filtered per session: `message_delta`, `tool_call`, `tool_result`, `turn_completed` (status and token usage), `error`, `status`. Each event also keeps the raw agent payload. A server restart marks sessions that were `running` as `error` and puts the in-flight prompt back on the queue. `POST /resume` continues them. Sessions that were only `queued` are eligible to start on boot.
+Events are monotonic per database and filtered per session: `message_delta`, `tool_call`, `tool_result`, `turn_completed` (status and token usage), `error`, `status`, and `attention`. The raw agent payload is stored but omitted from SSE and JSON reads unless `?raw=1` (MCP: `includeRaw: true`). A `types` filter is applied in SQL, and the cursor in the response is the last event returned, so a filtered client does not reread the same page. A server restart marks sessions that were `running` as `error` and puts the in-flight prompt back on the queue. `POST /resume` continues them. Sessions that were only `queued` are eligible to start on boot.
+
+### Attention triage
+
+When `XAI_API_KEY` is set, kennel asks xAI (`KENNEL_TRIAGE_MODEL`, default `grok-4.3`) whether a person should look. `KENNEL_TRIAGE_MODE` is `idle` (the default), `every_turn`, or `off`.
+
+`idle` makes one call when the prompt queue drains, covering every turn since the last successful triage. It also calls immediately when a turn ends `failed`, `interrupted`, or `error`, and when the final assistant message looks like it is waiting: it ends with a question, or it mentions waiting for input or approval, an auth or permission failure, or a rate limit. `every_turn` calls after each turn. `off`, or a missing API key, never calls.
+
+One request returns both the triage and the summaries. `batchSummary` is two to four sentences about the turns in that batch and is stored with `fromPromptId` and `toPromptId`. `sessionSummary` is a rolling summary of at most 150 words, rewritten from the previous one in the same call. A flag is stored only when `needsAttention` is true, and an `attention` event is emitted. `KENNEL_ATTENTION_WEBHOOK` receives the same JSON. A failed call is retried once, logged as `triage_error`, and does not fail the session; the prompts stay untriaged so the next trigger tries again.
+
+The key and the webhook URL are control-plane only. They are removed from the environment passed to Claude and Codex, and they are not placed in the Modal sandbox.
 
 ### Permissions
 
@@ -111,7 +125,7 @@ Claude uses `permissionMode`, `allowedTools`, and `disallowedTools`. `bypassPerm
 
 ### Claude auth
 
-The Claude Agent SDK inherits the process environment. `CLAUDE_CODE_OAUTH_TOKEN` is the subscription token. `ANTHROPIC_API_KEY` is the API key. `CLAUDE_CODE_USE_VERTEX=1` selects Vertex. On startup, if both the OAuth token and the API key are set, kennel warns that the API key wins.
+Claude is given a copy of the process environment with the triage key and webhook URL removed. `CLAUDE_CODE_OAUTH_TOKEN` is the subscription token. `ANTHROPIC_API_KEY` is the API key. `CLAUDE_CODE_USE_VERTEX=1` selects Vertex. On startup, if both the OAuth token and the API key are set, kennel warns that the API key wins.
 
 ## MCP and Grok Bot
 
@@ -123,7 +137,7 @@ export KENNEL_TOKEN=...
 npx kennel-mcp
 ```
 
-Tools: `create_session`, `list_sessions`, `get_session`, `send_prompt`, `get_events` (pass `after` and `waitMs` to long-poll), `interrupt`, `stop`, `resume`, `finish_session`, `close_session`.
+Tools: `create_session`, `list_sessions`, `get_session`, `send_prompt`, `get_events` (`after`, `waitMs`, `includeRaw` default false, `types`, `limit`), `interrupt`, `stop`, `resume`, `finish_session`, `close_session`, `list_flags`, `ack_flag`, `get_summaries`, `digest`. `get_session` and `list_sessions` include `sessionSummary`, `lastBatchSummary`, and `openFlags`.
 
 In Grok Bot, add a custom connector either as a remote MCP server (`http://<host>:8787/mcp` plus `Authorization: Bearer $KENNEL_TOKEN`; the startup log prints the connector shape with the token redacted) or as the stdio command `npx kennel-mcp` with `KENNEL_URL` and `KENNEL_TOKEN`.
 
@@ -142,7 +156,7 @@ npm test
 npm run typecheck
 ```
 
-Node 22. Tests cover the queue and boot recovery, SSE replay (`after` and `Last-Event-ID`), the Claude and Codex adapters against fakes, and the Modal backend against an in-process runner that speaks the real protocol. They do not call Modal, Claude, or Codex.
+Node 22. Tests cover the queue and boot recovery, SSE replay (`after` and `Last-Event-ID`), filtered events, the Claude and Codex adapters against fakes, the Modal backend against an in-process runner that speaks the real protocol, and triage against a mocked xAI endpoint. They do not call Modal, Claude, Codex, or xAI.
 
 SQLite comes from `node:sqlite`. The start script disables the experimental warning.
 
