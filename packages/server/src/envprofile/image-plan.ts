@@ -40,8 +40,9 @@ function runBash(body: string): string {
 function cloneScript(): string {
   return [
     "set -euo pipefail",
-    'if [ -n "${GITHUB_TOKEN:-}" ]; then',
-    '  git -c http.extraheader="AUTHORIZATION: bearer ${GITHUB_TOKEN}" clone --depth 1 "$REPO_URL" /opt/kennel-env/src',
+    'token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"',
+    'if [ -n "$token" ]; then',
+    '  git -c http.extraheader="AUTHORIZATION: bearer ${token}" clone --depth 1 "$REPO_URL" /opt/kennel-env/src',
     "else",
     '  git clone --depth 1 "$REPO_URL" /opt/kennel-env/src',
     "fi",
