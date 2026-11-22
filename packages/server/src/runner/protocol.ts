@@ -9,7 +9,7 @@ export interface RpcRequest {
 export interface RpcResponse {
   id: number;
   result?: Record<string, unknown>;
-  error?: { message: string };
+  error?: { message: string; status?: number };
 }
 
 export interface RpcEvent {

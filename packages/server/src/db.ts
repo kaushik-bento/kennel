@@ -303,6 +303,13 @@ export class KennelDb {
     return Number(result.changes);
   }
 
+  finishRunning(sessionId: string, status: PromptRow["status"]): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`UPDATE prompts SET status = ?, finished_at = ? WHERE session_id = ? AND status = 'running'`)
+      .run(status, now, sessionId);
+  }
+
   requeueRunning(sessionId: string): void {
     this.db
       .prepare(`UPDATE prompts SET status = 'queued', started_at = NULL, finished_at = NULL WHERE session_id = ? AND status = 'running'`)

@@ -5,6 +5,7 @@ import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { AgentKind, Permissions } from "@kennel/core";
 import type { AgentAdapter, RunningAgent } from "../adapters/types.js";
+import { KennelError } from "../errors.js";
 import { GitWorkspace } from "../git.js";
 import { decodeFrame, encodeFrame, type RpcRequest } from "./protocol.js";
 
@@ -103,7 +104,8 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
       write({ id: request.id, result });
     } catch (err) {
       const messageText = err instanceof Error ? err.message : String(err);
-      write({ id: request.id, error: { message: messageText } });
+      const status = err instanceof KennelError ? err.status : undefined;
+      write({ id: request.id, error: { message: messageText, ...(status ? { status } : {}) } });
     }
   }
   await running.agent?.close().catch(() => undefined);

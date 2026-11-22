@@ -40,7 +40,7 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
         timeoutMs: config.modalSandboxTimeoutMs,
         idleTimeoutMs: config.modalSandboxTimeoutMs,
         workdir: "/var/kennel",
-        env: { HOME: "/var/kennel/home" },
+        env: { HOME: "/var/kennel/home", IS_SANDBOX: "1" },
       };
       // Sandbox names are released asynchronously after terminate, so a
       // prompt that arrives right after the previous release can still see
@@ -62,7 +62,7 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
         stderr: "pipe",
         mode: "text",
         workdir: "/opt/kennel",
-        env: { HOME: "/var/kennel/home" },
+        env: { HOME: "/var/kennel/home", IS_SANDBOX: "1" },
       });
       const stderr = createInterface({ input: Readable.from(proc.stderr) });
       stderr.on("line", (line) => {

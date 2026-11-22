@@ -1,5 +1,6 @@
 import type { AgentKind } from "@kennel/core";
 import type { AgentEvent, AgentStartOptions, RunningAgent } from "../adapters/types.js";
+import { KennelError } from "../errors.js";
 import { decodeFrame, encodeFrame, type RpcEvent, type RpcResponse } from "../runner/protocol.js";
 import type { AgentConnection, RunnerStdio } from "./types.js";
 
@@ -103,7 +104,12 @@ export class RunnerConnection implements AgentConnection {
           const waiter = this.pending.get(response.id);
           if (!waiter) continue;
           this.pending.delete(response.id);
-          if (response.error) waiter.reject(new Error(response.error.message));
+          if (response.error) {
+            const err = typeof response.error.status === "number"
+              ? new KennelError(response.error.status, response.error.message)
+              : new Error(response.error.message);
+            waiter.reject(err);
+          }
           else waiter.resolve(response.result ?? {});
         }
       }

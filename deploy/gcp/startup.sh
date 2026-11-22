@@ -6,8 +6,8 @@
 #
 # Required Secret Manager secrets in this project:
 #   kennel-token          KENNEL_TOKEN
-#   modal-token-id        MODAL_TOKEN_ID
-#   modal-token-secret    MODAL_TOKEN_SECRET
+#   modal-token           JSON {"token_id": "...", "token_secret": "..."}
+#                         (or separate modal-token-id / modal-token-secret)
 # Optional:
 #   kennel-public-url     KENNEL_PUBLIC_URL (used only in the startup connector line)
 set -euo pipefail
@@ -32,7 +32,11 @@ id kennel >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/no
 install -d -o kennel -g kennel /var/lib/kennel /opt/kennel
 
 if [[ ! -f /opt/kennel/package.json ]]; then
-  sudo -u kennel git clone --depth 1 "${KENNEL_REPO_URL:-https://github.com/kaushik-bento/kennel.git}" /opt/kennel
+  CLONE_ARGS=(--depth 1)
+  if [[ -n "${KENNEL_GIT_REF:-}" ]]; then
+    CLONE_ARGS+=(--branch "$KENNEL_GIT_REF")
+  fi
+  sudo -u kennel git clone "${CLONE_ARGS[@]}" "${KENNEL_REPO_URL:-https://github.com/kaushik-bento/kennel.git}" /opt/kennel
 fi
 sudo -u kennel bash -lc 'cd /opt/kennel && npm ci && npm run build'
 
@@ -65,8 +69,13 @@ umask 077
 install -d -o root -g kennel -m 750 /etc/kennel
 {
   write_env KENNEL_TOKEN "$(fetch_secret kennel-token)"
-  write_env MODAL_TOKEN_ID "$(fetch_secret modal-token-id)"
-  write_env MODAL_TOKEN_SECRET "$(fetch_secret modal-token-secret)"
+  if modal_json=$(fetch_secret modal-token 2>/dev/null); then
+    write_env MODAL_TOKEN_ID "$(jq -r .token_id <<<"$modal_json")"
+    write_env MODAL_TOKEN_SECRET "$(jq -r .token_secret <<<"$modal_json")"
+  else
+    write_env MODAL_TOKEN_ID "$(fetch_secret modal-token-id)"
+    write_env MODAL_TOKEN_SECRET "$(fetch_secret modal-token-secret)"
+  fi
   write_env KENNEL_BACKEND modal
   write_env KENNEL_HOST 127.0.0.1
   write_env KENNEL_PORT 8787
@@ -81,7 +90,8 @@ install -d -o root -g kennel -m 750 /etc/kennel
 chown root:kennel /etc/kennel/kennel.env
 chmod 640 /etc/kennel/kennel.env
 
-cat > /etc/systemd/system/kennel.service <<'UNIT'
+NODE_BIN=$(command -v node)
+cat > /etc/systemd/system/kennel.service <<UNIT
 [Unit]
 Description=kennel control plane
 After=network-online.target
@@ -93,7 +103,7 @@ User=kennel
 Group=kennel
 EnvironmentFile=/etc/kennel/kennel.env
 WorkingDirectory=/opt/kennel
-ExecStart=/usr/local/bin/node --disable-warning=ExperimentalWarning /opt/kennel/packages/server/dist/index.js
+ExecStart=${NODE_BIN} --disable-warning=ExperimentalWarning /opt/kennel/packages/server/dist/index.js
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true

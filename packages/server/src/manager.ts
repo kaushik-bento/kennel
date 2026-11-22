@@ -27,8 +27,11 @@ interface LiveSession {
   agent: RunningAgent;
   conn: AgentConnection;
   turnActive: boolean;
+  provisioning: boolean;
   currentPromptId: string | null;
   stopRequested: boolean;
+  interruptRequested: boolean;
+  pendingSteers: string[];
   exited: boolean;
 }
 
@@ -135,9 +138,10 @@ export class SessionManager implements KennelApi {
       });
       if (plan.type === "reject") throw new KennelError(409, plan.message);
       if (plan.type === "steer") {
-        if (!live) throw new KennelError(409, "no active turn to steer");
+        if (!live || live.stopRequested) throw new KennelError(409, "no active turn to steer");
         const prompt = this.insertPrompt(id, input.text, "steer", "done");
-        await live.agent.steer(input.text);
+        if (live.provisioning) live.pendingSteers.push(input.text);
+        else await live.agent.steer(input.text);
         this.record(id, "status", { state: "running", queueDepth: this.db.queueDepth(id), steer: input.text, promptId: prompt.id }, undefined);
         return {
           promptId: prompt.id,
@@ -195,7 +199,10 @@ export class SessionManager implements KennelApi {
     return this.actor.run(async () => {
       const session = this.require(id);
       const live = this.live.get(id);
-      if (live?.turnActive) await live.agent.interrupt();
+      if (live?.turnActive) {
+        if (live.provisioning) live.interruptRequested = true;
+        else await live.agent.interrupt();
+      }
       return this.view(this.require(session.id));
     });
   }
@@ -206,13 +213,16 @@ export class SessionManager implements KennelApi {
       this.cancelIdleRelease(id);
       this.db.cancelQueued(id);
       const live = this.live.get(id);
-      if (live?.turnActive) {
+      if (live?.turnActive && !live.provisioning) {
         live.stopRequested = true;
+        this.db.finishRunning(id, "interrupted");
         this.db.setState(id, "stopped", null);
         this.record(id, "status", { state: "stopped", queueDepth: 0 }, undefined);
-        await live.agent.interrupt();
+        await live.agent.interrupt().catch(() => undefined);
         return this.view(this.require(id));
       }
+      if (live) live.stopRequested = true;
+      this.db.finishRunning(id, "interrupted");
       await this.release(id, "stopped", null);
       return this.view(this.require(id));
     });
@@ -223,9 +233,13 @@ export class SessionManager implements KennelApi {
       this.cancelIdleRelease(id);
       const session = this.require(id);
       const live = this.live.get(id);
-      if (live && !live.exited && live.turnActive) return this.view(session);
-      if (live?.exited) this.live.delete(id);
-      if (!live || live.exited) this.db.requeueRunning(id);
+      if (live && !live.exited && live.turnActive && !live.stopRequested) return this.view(session);
+      if (live) {
+        this.live.delete(id);
+        await this.releaseLive(live);
+        this.db.setSandboxId(id, null);
+      }
+      if (session.state !== "stopped") this.db.requeueRunning(id);
       const queued = this.db.queueDepth(id);
       const next: SessionState = queued > 0 ? "queued" : "idle";
       this.db.setState(id, next, null);
@@ -392,14 +406,21 @@ export class SessionManager implements KennelApi {
         },
         conn: { sandboxId: null, startAgent: async () => placeholder.agent, release: async () => undefined },
         turnActive: true,
+        provisioning: true,
         currentPromptId: promptId,
         stopRequested: false,
+        interruptRequested: false,
+        pendingSteers: [],
         exited: false,
       };
       this.live.set(sessionId, placeholder);
       try {
         const conn = await this.backend.acquire(session);
         placeholder.conn = conn;
+        if (this.live.get(sessionId) !== placeholder || placeholder.stopRequested) {
+          await conn.release().catch(() => undefined);
+          return;
+        }
         if (conn.sandboxId) this.db.setSandboxId(sessionId, conn.sandboxId);
         const agent = await conn.startAgent({
           kind: session.agent,
@@ -408,7 +429,7 @@ export class SessionManager implements KennelApi {
           ...(session.model ? { model: session.model } : {}),
           permissions: session.permissions,
           onEvent: (event) => {
-            this.actor.run(() => this.onAgentEvent(sessionId, event)).catch(() => undefined);
+            this.actor.run(() => this.onAgentEvent(sessionId, event, placeholder)).catch(() => undefined);
           },
           onNativeId: (nativeId) => {
             this.actor.run(() => {
@@ -417,9 +438,22 @@ export class SessionManager implements KennelApi {
           },
         });
         placeholder.agent = agent;
+        placeholder.provisioning = false;
         live = placeholder;
+        if (this.live.get(sessionId) !== live || live.stopRequested) {
+          await this.releaseLive(live);
+          return;
+        }
+        if (live.interruptRequested) {
+          live.interruptRequested = false;
+          this.onAgentEvent(sessionId, { type: "turn_completed", data: { status: "interrupted" } }, live);
+          return;
+        }
       } catch (err) {
-        this.live.delete(sessionId);
+        if (this.live.get(sessionId) === placeholder) this.live.delete(sessionId);
+        await placeholder.conn.release().catch(() => undefined);
+        this.db.setSandboxId(sessionId, null);
+        if (placeholder.stopRequested) return;
         const message = err instanceof Error ? err.message : String(err);
         this.db.finishPrompt(promptId, "error");
         this.db.setState(sessionId, "error", message);
@@ -436,6 +470,10 @@ export class SessionManager implements KennelApi {
     live.currentPromptId = promptId;
     try {
       await live.agent.deliver(text);
+      const steers = live.pendingSteers.splice(0);
+      for (const sText of steers) {
+        await live.agent.steer(sText);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       live.turnActive = false;
@@ -448,10 +486,11 @@ export class SessionManager implements KennelApi {
     }
   }
 
-  private onAgentEvent(sessionId: string, event: AgentEvent): void {
+  private onAgentEvent(sessionId: string, event: AgentEvent, sourceLive?: LiveSession): void {
     const session = this.db.getSession(sessionId);
     if (!session || session.deletedAt) return;
     const live = this.live.get(sessionId);
+    if (sourceLive && live !== sourceLive) return;
     if (event.type === "turn_completed") {
       const promptId = live?.currentPromptId ?? null;
       const status = String(event.data.status ?? "completed");
@@ -472,6 +511,7 @@ export class SessionManager implements KennelApi {
           this.live.delete(sessionId);
           void conn.release().catch(() => undefined);
         }
+        this.db.setSandboxId(sessionId, null);
         const message = String(event.data.error ?? "agent process exited");
         this.db.setState(sessionId, "error", message);
         this.record(sessionId, "status", { state: "error", detail: message }, undefined);

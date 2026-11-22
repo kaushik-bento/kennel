@@ -29,6 +29,7 @@ export class ModalSandboxBackend implements SandboxBackend {
   }): Promise<SandboxProvision> {
     const volumeName = volumeNameFor(input.sessionId);
     const connection = await this.open({ sessionId: input.sessionId, volumeName, secretName: this.secretName });
+    let provisioned = false;
     try {
       const boot = await connection.rpc("bootstrap", {
         root: MOUNT,
@@ -37,6 +38,7 @@ export class ModalSandboxBackend implements SandboxBackend {
         branch: input.branch,
         sessionId: input.sessionId,
       });
+      provisioned = true;
       return {
         worktreePath: String(boot.worktreePath),
         sourcePath: String(boot.sourcePath),
@@ -45,6 +47,9 @@ export class ModalSandboxBackend implements SandboxBackend {
       };
     } finally {
       await connection.release();
+      if (!provisioned) {
+        await this.host.deleteVolume(volumeName).catch(() => undefined);
+      }
     }
   }
 
