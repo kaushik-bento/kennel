@@ -57,7 +57,7 @@ function setupScript(profile: EnvProfile, postgres: ServiceSpec | undefined): st
   for (const [key, value] of Object.entries(profile.env)) {
     lines.push(`export ${key}=${shellArg(value)}`);
   }
-  for (const command of profile.setup) lines.push(command);
+  for (const command of profile.setup) lines.push(`(${command})`);
   if (postgres) {
     const version = postgres.version;
     lines.push(
