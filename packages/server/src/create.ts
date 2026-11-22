@@ -59,6 +59,7 @@ export function logReady(config: KennelConfig): void {
   console.log(`[kennel] data dir: ${config.dataDir}`);
   console.log(`[kennel] max concurrent sessions: ${config.maxConcurrent}`);
   console.log(`[kennel] sandbox backend: ${config.backend}`);
+  if (config.envDir) console.log(`[kennel] environment profiles: ${config.envDir}`);
   console.log(
     `[kennel] triage: ${config.triageMode}${config.xaiApiKey ? ` model=${config.triageModel}` : " (no XAI_API_KEY)"}`,
   );

@@ -104,7 +104,7 @@ export class ClaudeAdapter implements AgentAdapter {
       includePartialMessages: true,
       settingSources: ["project"],
       // The SDK replaces the process environment, so pass a copy with triage secrets removed.
-      env: agentEnv(),
+      env: agentEnv(process.env, { strip: options.stripEnv, extra: options.extraEnv }),
       stderr: (line) => {
         options.onEvent({ type: "error", data: { message: line, stream: "stderr" }, raw: line });
       },
@@ -117,6 +117,9 @@ export class ClaudeAdapter implements AgentAdapter {
     }
     if (options.permissions.allowedTools) queryOptions.allowedTools = options.permissions.allowedTools;
     if (options.permissions.disallowedTools) queryOptions.disallowedTools = options.permissions.disallowedTools;
+    if (options.testingAddendum) {
+      queryOptions.systemPrompt = { type: "preset", preset: "claude_code", append: options.testingAddendum };
+    }
 
     const query = sdk.query({ prompt: bridge.iterate(), options: queryOptions });
     const state = { interruptRequested: false, steerSuppress: 0, sawResult: false, closed: false };

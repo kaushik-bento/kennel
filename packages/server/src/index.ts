@@ -7,6 +7,11 @@ export { loadConfig } from "./config.js";
 export type { KennelConfig } from "./config.js";
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "env" && process.argv[3] === "build") {
+    const { buildProfileCommand } = await import("./envprofile/cli.js");
+    await buildProfileCommand(process.argv[4] ?? "");
+    return;
+  }
   const app = await createKennel();
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);

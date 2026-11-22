@@ -78,6 +78,7 @@ export async function startApp(options?: {
     modalSandboxTimeoutMs: 60_000,
     triageMode: options?.triageMode ?? "off",
     triageModel: "grok-4.3",
+    envAutobuild: false,
     ...(options?.xaiApiKey ? { xaiApiKey: options.xaiApiKey } : {}),
     ...(options?.xaiEndpoint ? { xaiEndpoint: options.xaiEndpoint } : {}),
     ...(options?.attentionWebhook ? { attentionWebhook: options.attentionWebhook } : {}),

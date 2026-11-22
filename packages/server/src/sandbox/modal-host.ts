@@ -26,6 +26,15 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
   return {
     async open(spec: ModalOpenSpec): Promise<RunnerStdio> {
       const volume = await modal.volumes.fromName(spec.volumeName, { createIfMissing: true, ...envParams });
+      let sandboxImage = image;
+      if (spec.imageName && spec.imageName !== config.modalImage) {
+        try {
+          sandboxImage = await modal.images.fromName(spec.imageName, envParams);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`[kennel] env image ${spec.imageName} unavailable (${message}); using ${config.modalImage}`);
+        }
+      }
       const name = `kennel-${spec.sessionId}`;
       try {
         const existing = await modal.sandboxes.fromName(config.modalApp, name, envParams);
@@ -41,6 +50,8 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
         idleTimeoutMs: config.modalSandboxTimeoutMs,
         workdir: "/var/kennel",
         env: { HOME: "/var/kennel/home", IS_SANDBOX: "1" },
+        ...(spec.cpu ? { cpu: spec.cpu } : {}),
+        ...(spec.memoryMiB ? { memoryMiB: spec.memoryMiB, memoryLimitMiB: spec.memoryMiB } : {}),
       };
       // Sandbox names are released asynchronously after terminate, so a
       // prompt that arrives right after the previous release can still see
@@ -48,7 +59,7 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
       let sandbox: Awaited<ReturnType<typeof modal.sandboxes.create>> | undefined;
       for (let attempt = 0; ; attempt++) {
         try {
-          sandbox = await modal.sandboxes.create(app, image, createParams);
+          sandbox = await modal.sandboxes.create(app, sandboxImage, createParams);
           break;
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -82,6 +93,14 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
     },
     async deleteVolume(volumeName: string) {
       await modal.volumes.delete(volumeName, { allowMissing: true, ...envParams });
+    },
+    async imageExists(name: string) {
+      try {
+        await modal.images.fromName(name, envParams);
+        return true;
+      } catch {
+        return false;
+      }
     },
   };
 }

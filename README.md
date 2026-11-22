@@ -149,6 +149,16 @@ In Grok Bot, add a custom connector either as a remote MCP server (`http://<host
 
 Bind the control plane to localhost and put TLS and a network policy in front if anything other than the orchestrator can route to it. The Modal tokens on the control plane can create sandboxes; treat them like the kennel token.
 
+## Environment profiles
+
+A profile teaches a session how to run a repo's tests. Profiles are YAML files in `KENNEL_ENV_DIR` (or `./environments` when that directory exists). Each one matches a repository URL and describes apt packages, language runtimes, local services, setup commands, check tiers, and cache directories. `environments/example.yaml` is a generic example. Keep real profiles outside this repository.
+
+`kennel env build <profile>` hashes the lockfiles named in the profile at the repo's default branch and publishes a Modal image `kennel-env-<profile>-<hash>`. The build clones that commit, runs the setup commands, and snapshots the local database directory into the image. A changed lockfile produces a new hash, so the next build does not reuse the old image. The control plane does the same check when a session starts. If that image is missing or the lookup fails, the session uses `kennel-agent`, logs the reason, and can rebuild in the background (`KENNEL_ENV_AUTOBUILD=0` disables the rebuild). The session is not blocked on the build.
+
+On a matched image, the first sandbox for a session copies the database snapshot onto the session volume and starts the local services. Nothing in the profile should point at a remote database. The agent receives `KENNEL_TESTING.md` in the worktree and, for Claude, the same text appended to its system prompt. The task is not done until the `fast` tier and the relevant `targeted` tier pass. `finish` adds a Kennel checks section to the pull request body from `.kennel/checks.jsonl` and from commands seen in the session. Those paths are left out of the commit.
+
+The sandbox size is the profile's `sandbox` block, or the larger of the `fast` and `targeted` tiers. The `full` tier can ask for more CPU and memory than the session has.
+
 ## Develop
 
 ```bash

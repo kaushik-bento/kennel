@@ -1,0 +1,62 @@
+# Generic example. Point KENNEL_ENV_DIR at a private directory for real repos.
+name: example
+description: A small app with a local Postgres and Redis.
+repos:
+  - https://github.com/example/app
+  - git@github.com:example/app.git
+# Install the Postgres major named under services before the apt packages.
+preBuild:
+  - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg
+  - install -d /usr/share/postgresql-common/pgdg && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+  - bash -c "source /etc/os-release && echo deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main > /etc/apt/sources.list.d/pgdg.list"
+apt:
+  - postgresql-17
+  - postgresql-17-pgvector
+  - redis-server
+runtimes:
+  - name: node
+    version: "22"
+services:
+  - kind: postgres
+    version: "17"
+    extensions: [vector]
+    databases: [app]
+    port: 5432
+    user: postgres
+    password: postgres
+  - kind: redis
+    version: "7"
+    port: 6379
+setup:
+  - npm ci
+  - npm run db:migrate
+env:
+  DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/app
+  REDIS_URL: redis://127.0.0.1:6379
+checks:
+  fast:
+    command: npm test
+    cpu: 2
+    memoryMiB: 4096
+  targeted:
+    command: npm test -- --changed
+    cpu: 2
+    memoryMiB: 4096
+  full:
+    command: npm test && npm run build
+    cpu: 4
+    memoryMiB: 8192
+cache:
+  - /var/kennel/cache/npm
+  - .turbo
+lockfiles:
+  - package-lock.json
+deny:
+  - Do not deploy this app or contact a shared environment.
+stripEnv:
+  - EXAMPLE_REMOTE_DATABASE_URL
+notes:
+  - One test looks up a hostname and needs working DNS.
+sandbox:
+  cpu: 2
+  memoryMiB: 4096

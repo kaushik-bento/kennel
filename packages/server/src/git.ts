@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { loadChecksFile, pullRequestBody, renderCheckReport } from "./envprofile/checks.js";
+import type { CheckTier } from "./envprofile/types.js";
 import { KennelError } from "./errors.js";
 import { runCommand } from "./exec.js";
 
@@ -66,29 +68,36 @@ export class GitWorkspace {
     commitMessage: string;
     openPr: boolean;
     repo: string;
+    checks?: {
+      tiers: Array<{ tier: string; command: string }>;
+      events: Array<{ type: string; data: Record<string, unknown> }>;
+    };
   }): Promise<{ committed: boolean; commit: string | null; pushed: boolean; prUrl: string | null; prError: string | null }> {
     const porcelain = (await git(["-C", input.worktreePath, "status", "--porcelain"])).trim();
     let committed = false;
     let commit: string | null = null;
     if (porcelain) {
       await git(["-C", input.worktreePath, "add", "-A"]);
-      await git([
-        "-C",
-        input.worktreePath,
-        "-c",
-        "user.email=kennel@localhost",
-        "-c",
-        "user.name=kennel",
-        "commit",
-        "-m",
-        input.commitMessage,
-      ]);
-      committed = true;
-      commit = (await git(["-C", input.worktreePath, "rev-parse", "HEAD"])).trim();
-    } else {
-      const head = (await git(["-C", input.worktreePath, "rev-parse", "HEAD"])).trim();
-      commit = head || null;
+      await git(["-C", input.worktreePath, "reset", "-q", "--", "KENNEL_TESTING.md", ".kennel"]).catch(() => "");
+      const staged = (await git(["-C", input.worktreePath, "diff", "--cached", "--name-only"])).trim();
+      if (staged) {
+        await git([
+          "-C",
+          input.worktreePath,
+          "-c",
+          "user.email=kennel@localhost",
+          "-c",
+          "user.name=kennel",
+          "commit",
+          "-m",
+          input.commitMessage,
+        ]);
+        committed = true;
+      }
     }
+    const head = (await git(["-C", input.worktreePath, "rev-parse", "HEAD"])).trim();
+    commit = head || null;
+    const body = pullRequestBody(input.commitMessage, checksSection(input));
     await git(["-C", input.worktreePath, "push", "-u", "origin", input.branch]);
     if (!input.openPr) {
       return { committed, commit, pushed: true, prUrl: null, prError: null };
@@ -109,7 +118,7 @@ export class GitWorkspace {
           "--title",
           input.commitMessage,
           "--body",
-          input.commitMessage,
+          body,
         ], { cwd: input.worktreePath })
       ).trim();
       return { committed, commit, pushed: true, prUrl: url || null, prError: null };
@@ -155,6 +164,21 @@ export class GitWorkspace {
     }
     throw new KennelError(400, `base branch not found: ${baseBranch}`);
   }
+}
+
+function checksSection(input: {
+  worktreePath: string;
+  checks?: {
+    tiers: Array<{ tier: string; command: string }>;
+    events: Array<{ type: string; data: Record<string, unknown> }>;
+  };
+}): string {
+  if (!input.checks || input.checks.tiers.length === 0) return "";
+  return renderCheckReport({
+    tiers: input.checks.tiers.map((tier) => ({ tier: tier.tier as CheckTier, command: tier.command })),
+    events: input.checks.events,
+    records: loadChecksFile(input.worktreePath),
+  });
 }
 
 async function ghAvailable(): Promise<boolean> {

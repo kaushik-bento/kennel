@@ -1,11 +1,13 @@
 import { createInterface } from "node:readline";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { AgentKind, Permissions } from "@kennel/core";
 import type { AgentAdapter, RunningAgent } from "../adapters/types.js";
 import { KennelError } from "../errors.js";
+import type { SessionEnvironment } from "../envprofile/catalog.js";
+import { installTestingDoc } from "../envprofile/workspace-files.js";
 import { GitWorkspace } from "../git.js";
 import { decodeFrame, encodeFrame, type RpcRequest } from "./protocol.js";
 
@@ -25,6 +27,7 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
   };
   let git: GitWorkspace | null = null;
   let worktreePath = "";
+  let environment: SessionEnvironment | null = null;
   const running: { agent: RunningAgent | null } = { agent: null };
   const lines = createInterface({ input: io.input });
 
@@ -42,6 +45,8 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
         sessionId: String(params.sessionId),
       });
       worktreePath = prepared.worktreePath;
+      environment = readEnvironment(params.environment);
+      if (environment) applyEnvironment(root, worktreePath, environment);
       return { worktreePath: prepared.worktreePath, sourcePath: prepared.sourcePath, branch: prepared.branch };
     }
     if (request.method === "start") {
@@ -56,6 +61,8 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
         nativeId: typeof params.nativeId === "string" ? params.nativeId : null,
         ...(typeof params.model === "string" ? { model: params.model } : {}),
         permissions,
+        ...(environment?.testingDoc ? { testingAddendum: environment.testingDoc } : {}),
+        ...(environment ? { extraEnv: environment.env, stripEnv: environment.stripEnv } : {}),
         onEvent: (event) => write({ method: "event", params: { type: event.type, data: event.data, raw: event.raw } }),
         onNativeId: (id) => write({ method: "native", params: { id } }),
       });
@@ -82,6 +89,7 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
     }
     if (request.method === "finish") {
       if (!git || !worktreePath) throw new Error("bootstrap before finish");
+      const checks = params.checks as { tiers?: Array<{ tier: string; command: string }>; events?: Array<{ type: string; data: Record<string, unknown> }> } | undefined;
       const result = await git.finish({
         worktreePath,
         branch: String(params.branch),
@@ -89,6 +97,9 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
         commitMessage: String(params.commitMessage),
         openPr: params.openPr !== false,
         repo: String(params.repo ?? ""),
+        ...(checks?.tiers
+          ? { checks: { tiers: checks.tiers, events: checks.events ?? [] } }
+          : {}),
       });
       return { ...result };
     }
@@ -121,6 +132,46 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
  *   so private https clones and pushes work.
  * - A default git identity so agents can commit.
  */
+function readEnvironment(value: unknown): SessionEnvironment | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Partial<SessionEnvironment>;
+  if (typeof record.profile !== "string" || typeof record.testingDoc !== "string") return null;
+  return {
+    profile: record.profile,
+    image: typeof record.image === "string" ? record.image : "",
+    fallback: Boolean(record.fallback),
+    testingDoc: record.testingDoc,
+    sessionScript: typeof record.sessionScript === "string" ? record.sessionScript : "",
+    env: record.env && typeof record.env === "object" ? record.env : {},
+    stripEnv: Array.isArray(record.stripEnv) ? record.stripEnv.filter((item) => typeof item === "string") : [],
+    stripPaths: Array.isArray(record.stripPaths) ? record.stripPaths.filter((item) => typeof item === "string") : [],
+    checks: Array.isArray(record.checks) ? record.checks : [],
+  };
+}
+
+function applyEnvironment(root: string, worktree: string, environment: SessionEnvironment): void {
+  installTestingDoc(worktree, environment.testingDoc);
+  const homeDoc = path.join(root, "home", "KENNEL_TESTING.md");
+  mkdirSync(path.dirname(homeDoc), { recursive: true });
+  writeFileSync(homeDoc, environment.testingDoc);
+  for (const key of environment.stripEnv) delete process.env[key];
+  for (const target of environment.stripPaths) {
+    rmSync(target, { recursive: true, force: true });
+  }
+  for (const [key, value] of Object.entries(environment.env)) {
+    if (!environment.stripEnv.includes(key)) process.env[key] = value;
+  }
+  if (!environment.sessionScript) return;
+  const script = path.join(root, "session-env.sh");
+  writeFileSync(script, environment.sessionScript, { mode: 0o755 });
+  const started = spawnSync("bash", [script], { env: process.env, encoding: "utf8", timeout: 120_000 });
+  if (started.stdout?.trim()) console.error(started.stdout.trim());
+  if (started.stderr?.trim()) console.error(started.stderr.trim());
+  if (started.status !== 0) {
+    console.error(`[kennel] session environment script exited ${started.status ?? "signal"}`);
+  }
+}
+
 export function prepareHome(env: NodeJS.ProcessEnv): void {
   const home = env.HOME;
   if (!home) return;

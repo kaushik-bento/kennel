@@ -15,6 +15,10 @@ export interface AgentStartOptions {
   permissions: Permissions;
   onEvent: (event: AgentEvent) => void;
   onNativeId: (id: string) => void;
+  /** Profile testing notes. Claude appends them to the system prompt. */
+  testingAddendum?: string;
+  extraEnv?: Record<string, string>;
+  stripEnv?: string[];
 }
 
 export interface RunningAgent {

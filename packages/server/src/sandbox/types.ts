@@ -12,6 +12,7 @@ export interface SandboxProvision {
 export interface FinishRequest {
   commitMessage: string;
   openPr: boolean;
+  events?: Array<{ type: string; data: Record<string, unknown> }>;
 }
 
 export interface AgentConnection {
@@ -48,6 +49,9 @@ export interface ModalOpenSpec {
   sessionId: string;
   volumeName: string;
   secretName: string;
+  imageName?: string;
+  cpu?: number;
+  memoryMiB?: number;
 }
 
 /**
@@ -58,4 +62,6 @@ export interface ModalOpenSpec {
 export interface ModalHost {
   open(spec: ModalOpenSpec): Promise<RunnerStdio>;
   deleteVolume(volumeName: string): Promise<void>;
+  /** False when that published image cannot be resolved. */
+  imageExists?(name: string): Promise<boolean>;
 }

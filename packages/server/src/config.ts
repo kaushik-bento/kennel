@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { SandboxBackendKind, TriageMode } from "@kennel/core";
@@ -30,6 +30,10 @@ export interface KennelConfig {
   xaiApiKey?: string;
   attentionWebhook?: string;
   xaiEndpoint?: string;
+  /** Directory of environment profile YAML. Unset when the directory is absent. */
+  envDir?: string;
+  /** When a matched image is missing, build it in the background instead of blocking the session. */
+  envAutobuild: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
@@ -85,7 +89,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
     modalSandboxTimeoutMs,
     triageMode,
     triageModel: env.KENNEL_TRIAGE_MODEL || "grok-4.3",
+    envAutobuild: env.KENNEL_ENV_AUTOBUILD !== "0",
   };
+  const envDir = env.KENNEL_ENV_DIR
+    ? path.resolve(env.KENNEL_ENV_DIR)
+    : existsSync(path.resolve("environments"))
+      ? path.resolve("environments")
+      : undefined;
+  if (envDir) config.envDir = envDir;
   if (env.XAI_API_KEY) config.xaiApiKey = env.XAI_API_KEY;
   if (env.KENNEL_ATTENTION_WEBHOOK) config.attentionWebhook = env.KENNEL_ATTENTION_WEBHOOK;
   if (env.KENNEL_PUBLIC_URL) config.publicUrl = env.KENNEL_PUBLIC_URL;

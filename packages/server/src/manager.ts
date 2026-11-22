@@ -319,9 +319,14 @@ export class SessionManager implements KennelApi {
       const live = this.live.get(id);
       if (live) await this.release(id, session.state, session.error);
       await this.waitReleasing(id);
+      const events = this.db.eventsAfter(id, 0, 2000, { includeRaw: false }).map((event) => ({
+        type: event.type,
+        data: event.data,
+      }));
       const result = await this.backend.finish(this.require(id), {
         commitMessage: input.commitMessage,
         openPr: input.openPr !== false,
+        events,
       });
       this.record(id, "status", { state: session.state, finish: result }, undefined);
       return { ...result, branch: session.branch };
