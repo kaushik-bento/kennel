@@ -89,7 +89,7 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
     }
     if (request.method === "finish") {
       if (!git || !worktreePath) throw new Error("bootstrap before finish");
-      const checks = params.checks as { tiers?: Array<{ tier: string; command: string }>; events?: Array<{ type: string; data: Record<string, unknown> }> } | undefined;
+      const checks = params.checks as { tiers?: Array<{ tier: string; command: string; required?: boolean }>; events?: Array<{ type: string; data: Record<string, unknown> }> } | undefined;
       const result = await git.finish({
         worktreePath,
         branch: String(params.branch),

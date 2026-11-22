@@ -34,8 +34,8 @@ export async function createSandboxBackend(
           gitSha: inspected.sha,
           imageName: tag,
           appName: config.modalApp,
-          secretName: config.modalSecret,
           baseImage: config.modalImage,
+          ...(config.buildSecret ? { buildSecret: config.buildSecret } : {}),
           ...(config.modalEnvironment ? { environment: config.modalEnvironment } : {}),
         });
       }

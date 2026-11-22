@@ -1,10 +1,12 @@
-export const CHECK_TIERS = ["fast", "targeted", "full"] as const;
-export type CheckTier = (typeof CHECK_TIERS)[number];
+/** Tiers in the default gate when a profile does not set `default` explicitly. */
+export const DEFAULT_CHECK_TIERS = ["fast", "targeted"] as const;
 
 export interface CheckSpec {
   command: string;
   cpu?: number;
   memoryMiB?: number;
+  /** Included in the gate that must pass before the task is done. */
+  default: boolean;
 }
 
 export interface RuntimeSpec {
@@ -39,7 +41,8 @@ export interface EnvProfile {
   /** Commands baked into the image after the repo is cloned. Migrations and seeds belong here. */
   setup: string[];
   env: Record<string, string>;
-  checks: Partial<Record<CheckTier, CheckSpec>>;
+  /** Named check tiers. Names are not limited to fast, targeted, and full. */
+  checks: Record<string, CheckSpec>;
   /** Directories that live on the session volume so installs and builds stay warm. */
   cache: string[];
   /** Lockfiles hashed at the default branch. A new hash publishes a new image. */
@@ -79,7 +82,7 @@ export interface CheckRecord {
 }
 
 export interface CheckObservation {
-  tier: CheckTier;
+  tier: string;
   command: string;
   seen: boolean;
   exitCode: number | null;

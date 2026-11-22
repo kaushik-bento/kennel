@@ -9,9 +9,9 @@ import { hashLockfiles, imageName } from "./hash.js";
  *
  * Reads profiles from KENNEL_ENV_DIR (or ./environments), hashes the lockfiles
  * on the default branch, and publishes kennel-env-<profile>-<hash>.
- * Modal credentials and a GitHub token that can read the repo must be available
- * to this process. The token is passed to the image build as a Modal Secret
- * (`KENNEL_MODAL_SECRET`, default kennel-agent) and is not printed.
+ * Modal credentials must be available to this process. A private clone uses
+ * GITHUB_TOKEN or GH_TOKEN from the environment, or the Modal secret named by
+ * KENNEL_BUILD_SECRET. The agent secret is not mounted into the build.
  */
 export async function buildProfileCommand(name: string): Promise<void> {
   if (!name) throw new Error("usage: kennel env build <profile>");
@@ -33,7 +33,7 @@ export async function buildProfileCommand(name: string): Promise<void> {
     gitSha: inspected.sha,
     imageName: tag,
     appName: process.env.KENNEL_MODAL_APP || "kennel",
-    secretName: process.env.KENNEL_MODAL_SECRET || "kennel-agent",
+    ...(process.env.KENNEL_BUILD_SECRET ? { buildSecret: process.env.KENNEL_BUILD_SECRET } : {}),
     baseImage: process.env.KENNEL_MODAL_IMAGE || "kennel-agent",
     ...(environment ? { environment } : {}),
   });

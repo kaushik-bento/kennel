@@ -17,15 +17,13 @@ export interface ImageBuildPlan {
  */
 export function planImage(profile: EnvProfile): ImageBuildPlan {
   const commands: string[] = [];
-  for (const line of profile.preBuild) commands.push(`RUN ${line}`);
+  for (const line of profile.preBuild) commands.push(runBash(line));
   if (profile.apt.length > 0) {
     const packages = profile.apt.map(shellArg).join(" ");
-    commands.push(
-      `RUN apt-get update && apt-get install -y --no-install-recommends ${packages} && rm -rf /var/lib/apt/lists/*`,
-    );
+    commands.push(runBash(`apt-get update && apt-get install -y --no-install-recommends ${packages} && rm -rf /var/lib/apt/lists/*`));
   }
-  for (const runtime of profile.runtimes) commands.push(...runtimeCommands(runtime.name, runtime.version));
-  commands.push("RUN mkdir -p /opt/kennel-env/src");
+  for (const runtime of profile.runtimes) commands.push(runBash(runtimeCommand(runtime.name, runtime.version)));
+  commands.push(runBash("mkdir -p /opt/kennel-env/src"));
   commands.push(runBash(cloneScript()));
   const postgres = profile.services.find((service) => service.kind === "postgres");
   const setup = setupScript(profile, postgres);
@@ -33,20 +31,40 @@ export function planImage(profile: EnvProfile): ImageBuildPlan {
   return { commands, setupScript: setup, sessionScript: renderSessionScript(profile, postgres) };
 }
 
-function runBash(body: string): string {
+/** Modal expands `$` in RUN text. Base64 keeps the shell script verbatim. */
+export function runBash(body: string): string {
   return `RUN echo ${Buffer.from(body, "utf8").toString("base64")} | base64 -d | bash`;
 }
 
-function cloneScript(): string {
+export function decodeRun(command: string): string {
+  const match = /^RUN echo ([A-Za-z0-9+/=]+) \| base64 -d \| bash$/.exec(command);
+  if (!match?.[1]) return command;
+  return Buffer.from(match[1], "base64").toString("utf8");
+}
+
+/**
+ * Clone over HTTPS with a credential helper. GitHub rejects Bearer tokens.
+ * The helper reads GITHUB_TOKEN or GH_TOKEN from the environment. The value
+ * is not written into this script, an argv string, or a URL.
+ */
+export function cloneScript(): string {
   return [
     "set -euo pipefail",
-    'token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"',
-    'if [ -n "$token" ]; then',
-    '  git -c http.extraheader="AUTHORIZATION: bearer ${token}" clone --depth 1 "$REPO_URL" /opt/kennel-env/src',
+    'if [ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then',
+    "  helper=$(mktemp)",
+    "  cat > \"$helper\" << 'EOF'",
+    "#!/bin/sh",
+    "echo username=x-access-token",
+    "printf 'password=%s\\n' \"${GITHUB_TOKEN:-${GH_TOKEN:-}}\"",
+    "EOF",
+    "  chmod 700 \"$helper\"",
+    '  git -c "credential.helper=$helper" clone --depth 1 "$REPO_URL" /opt/kennel-env/src',
+    '  git -c "credential.helper=$helper" -C /opt/kennel-env/src fetch --depth 1 origin "$GIT_SHA"',
+    "  rm -f \"$helper\"",
     "else",
     '  git clone --depth 1 "$REPO_URL" /opt/kennel-env/src',
+    '  git -C /opt/kennel-env/src fetch --depth 1 origin "$GIT_SHA"',
     "fi",
-    'git -C /opt/kennel-env/src fetch --depth 1 origin "$GIT_SHA"',
     'git -C /opt/kennel-env/src checkout --detach "$GIT_SHA"',
   ].join("\n");
 }
@@ -128,28 +146,24 @@ export function renderSessionScript(profile: EnvProfile, postgres?: ServiceSpec)
   return `${lines.join("\n")}\n`;
 }
 
-function runtimeCommands(name: EnvProfile["runtimes"][number]["name"], version: string | undefined): string[] {
+function runtimeCommand(name: EnvProfile["runtimes"][number]["name"], version: string | undefined): string {
   if (name === "node") {
     const major = (version ?? "22").split(".")[0] ?? "22";
-    return [
-      `RUN curl -fsSL https://deb.nodesource.com/setup_${major}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*`,
-    ];
+    return `curl -fsSL https://deb.nodesource.com/setup_${major}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*`;
   }
   if (name === "bun") {
     const pin = version ? `export BUN_VERSION=${shellArg(version)}; ` : "";
-    return [
-      `RUN ${pin}curl -fsSL https://bun.sh/install | bash && ln -sf /root/.bun/bin/bun /usr/local/bin/bun`,
-    ];
+    return `${pin}curl -fsSL https://bun.sh/install | bash && ln -sf /root/.bun/bin/bun /usr/local/bin/bun`;
   }
   if (name === "uv") {
-    return ["RUN curl -LsSf https://astral.sh/uv/install.sh | sh && ln -sf /root/.local/bin/uv /usr/local/bin/uv"];
+    return "curl -LsSf https://astral.sh/uv/install.sh | sh && ln -sf /root/.local/bin/uv /usr/local/bin/uv";
   }
   if (name === "python") {
     const pin = version ? shellArg(version) : "";
-    return [`RUN uv python install ${pin}`.trim()];
+    return `uv python install ${pin}`.trim();
   }
   const pin = version ? shellArg(version) : "latest";
-  return [`RUN npm install -g pnpm@${pin} && ln -sf "$(command -v pnpm)" /usr/local/bin/pnpm`];
+  return `npm install -g pnpm@${pin} && ln -sf "$(command -v pnpm)" /usr/local/bin/pnpm`;
 }
 
 function shellArg(value: string): string {

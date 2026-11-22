@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { CHECK_TIERS, type CheckObservation, type CheckRecord, type CheckTier } from "./types.js";
+import type { CheckObservation, CheckRecord } from "./types.js";
 
 export interface CheckReportInput {
-  tiers: Array<{ tier: CheckTier | string; command: string }>;
+  tiers: Array<{ tier: string; command: string; required?: boolean }>;
   events: Array<{ type: string; data: Record<string, unknown> }>;
   records: CheckRecord[];
 }
@@ -26,7 +26,7 @@ export function renderCheckReport(input: CheckReportInput): string {
       `| ${record.tier} | ${exitText(record.exitCode)} | \`${escapeCell(record.command ?? "")}\` | agent report |`,
     );
   }
-  const required = input.tiers.filter((tier) => tier.tier === "fast" || tier.tier === "targeted");
+  const required = input.tiers.filter((tier) => tier.required);
   const missing = required.filter((tier) => {
     const record = input.records.find((item) => item.tier === tier.tier);
     const observation = observed.find((item) => item.tier === tier.tier);
@@ -34,7 +34,7 @@ export function renderCheckReport(input: CheckReportInput): string {
   });
   lines.push("");
   if (missing.length === 0 && required.length > 0) {
-    lines.push("Required checks (`fast` and `targeted`) passed.");
+    lines.push("Required checks passed.");
   } else if (missing.length > 0) {
     lines.push(`Required checks not recorded as passed: ${missing.map((tier) => `\`${tier.tier}\``).join(", ")}.`);
   }
@@ -58,13 +58,13 @@ export function observationsFromEvents(
   }
   return tiers.map((tier) => {
     const call = [...calls.entries()].find(([, value]) => value.tier === tier.tier);
-    if (!call) return { tier: tier.tier as CheckTier, command: tier.command, seen: false, exitCode: null, isError: false };
+    if (!call) return { tier: tier.tier, command: tier.command, seen: false, exitCode: null, isError: false };
     const result = events.find(
       (event) => event.type === "tool_result" && String(event.data.toolUseId ?? "") === call[0],
     );
     const exitCode = result ? exitCodeOf(result.data.output) : null;
     return {
-      tier: tier.tier as CheckTier,
+      tier: tier.tier,
       command: tier.command,
       seen: true,
       exitCode,
@@ -162,8 +162,4 @@ function normalize(command: string): string {
 
 function escapeCell(value: string): string {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
-}
-
-export function isKnownTier(tier: string): tier is CheckTier {
-  return (CHECK_TIERS as readonly string[]).includes(tier);
 }

@@ -1,4 +1,4 @@
-import { CHECK_TIERS, type CheckTier, type EnvProfile } from "./types.js";
+import type { EnvProfile } from "./types.js";
 import { sessionResources } from "./load.js";
 
 /** Instructions written to KENNEL_TESTING.md and appended to the agent prompt. */
@@ -26,13 +26,18 @@ export function renderTestingDoc(profile: EnvProfile, options?: { fallback?: boo
     "Postgres, when this profile includes it, runs inside the sandbox. Its data directory is restored from the image snapshot onto the session volume the first time the sandbox starts, so the database is fresh for this session and stays with it. Redis, when included, listens on localhost. Do not point the database or cache variables at a remote host. The only database is the local one.",
   );
   lines.push("");
-  lines.push("The task is not done until the `fast` checks and the relevant `targeted` checks have passed.");
+  const gate = Object.entries(profile.checks)
+    .filter(([, check]) => check.default)
+    .map(([name]) => `\`${name}\``);
+  lines.push(
+    gate.length > 0
+      ? `The task is not done until these checks have passed: ${gate.join(", ")}.`
+      : "This profile does not mark a default check gate.",
+  );
   lines.push("");
   lines.push("## Checks");
-  for (const tier of CHECK_TIERS) {
-    const check = profile.checks[tier];
-    if (!check) continue;
-    lines.push("", `### ${tier}`, "", "```sh", check.command, "```");
+  for (const [tier, check] of Object.entries(profile.checks)) {
+    lines.push("", `### ${tier}${check.default ? " (default)" : ""}`, "", "```sh", check.command, "```");
     const size = sizeText(check.cpu, check.memoryMiB);
     if (size) lines.push("", `Sandbox for this tier: ${size}.`);
   }
@@ -70,7 +75,7 @@ export function renderTestingDoc(profile: EnvProfile, options?: { fallback?: boo
     '{"tier":"fast","command":"<the command>","exitCode":0,"summary":"what happened"}',
     "```",
     "",
-    "Use the tier name `fast`, `targeted`, or `full`. This file is local bookkeeping. Do not commit it or this document.",
+    "Use the tier name from this document. This file is local bookkeeping. Do not commit it or this document.",
     "",
   );
   return lines.join("\n");
@@ -81,8 +86,4 @@ function sizeText(cpu: number | undefined, memoryMiB: number | undefined): strin
   if (cpu) parts.push(`${cpu} CPU`);
   if (memoryMiB) parts.push(`${memoryMiB} MiB memory`);
   return parts.join(", ");
-}
-
-export function tierLabel(tier: CheckTier): string {
-  return tier;
 }

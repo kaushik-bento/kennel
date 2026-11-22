@@ -34,6 +34,8 @@ export interface KennelConfig {
   envDir?: string;
   /** When a matched image is missing, build it in the background instead of blocking the session. */
   envAutobuild: boolean;
+  /** Modal secret with only a GitHub token, used when the process has no GITHUB_TOKEN. */
+  buildSecret?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
@@ -91,6 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
     triageModel: env.KENNEL_TRIAGE_MODEL || "grok-4.3",
     envAutobuild: env.KENNEL_ENV_AUTOBUILD !== "0",
   };
+  if (env.KENNEL_BUILD_SECRET) config.buildSecret = env.KENNEL_BUILD_SECRET;
   const envDir = env.KENNEL_ENV_DIR
     ? path.resolve(env.KENNEL_ENV_DIR)
     : existsSync(path.resolve("environments"))

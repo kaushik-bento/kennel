@@ -2,7 +2,6 @@ import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { loadChecksFile, pullRequestBody, renderCheckReport } from "./envprofile/checks.js";
-import type { CheckTier } from "./envprofile/types.js";
 import { KennelError } from "./errors.js";
 import { runCommand } from "./exec.js";
 
@@ -69,7 +68,7 @@ export class GitWorkspace {
     openPr: boolean;
     repo: string;
     checks?: {
-      tiers: Array<{ tier: string; command: string }>;
+      tiers: Array<{ tier: string; command: string; required?: boolean }>;
       events: Array<{ type: string; data: Record<string, unknown> }>;
     };
   }): Promise<{ committed: boolean; commit: string | null; pushed: boolean; prUrl: string | null; prError: string | null }> {
@@ -169,13 +168,13 @@ export class GitWorkspace {
 function checksSection(input: {
   worktreePath: string;
   checks?: {
-    tiers: Array<{ tier: string; command: string }>;
+    tiers: Array<{ tier: string; command: string; required?: boolean }>;
     events: Array<{ type: string; data: Record<string, unknown> }>;
   };
 }): string {
   if (!input.checks || input.checks.tiers.length === 0) return "";
   return renderCheckReport({
-    tiers: input.checks.tiers.map((tier) => ({ tier: tier.tier as CheckTier, command: tier.command })),
+    tiers: input.checks.tiers,
     events: input.checks.events,
     records: loadChecksFile(input.worktreePath),
   });

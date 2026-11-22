@@ -4,11 +4,12 @@ import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import { loadChecksFile, renderCheckReport } from "../src/envprofile/checks.js";
 import { hashLockfiles, imageName } from "../src/envprofile/hash.js";
-import { planImage } from "../src/envprofile/image-plan.js";
-import { loadProfiles, matchProfile, repoKey } from "../src/envprofile/load.js";
+import { cloneScript, decodeRun, planImage } from "../src/envprofile/image-plan.js";
+import { loadProfiles, matchProfile, parseProfile, repoKey } from "../src/envprofile/load.js";
+import { buildFailureMessage, redactSecrets } from "../src/envprofile/redact.js";
 import { selectSessionImage } from "../src/envprofile/select.js";
 import { renderTestingDoc } from "../src/envprofile/testing-doc.js";
-import { writeFileSync, mkdtempSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const profilesDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../environments");
@@ -106,14 +107,15 @@ describe("environment profiles", () => {
     const profile = matchProfile(loadProfiles(profilesDir), "https://github.com/example/app");
     assert.ok(profile);
     const doc = renderTestingDoc(profile);
-    assert.match(doc, /not done until the `fast` checks/);
+    assert.match(doc, /not done until these checks have passed: `fast`, `targeted`/);
     assert.match(doc, /npm test -- --changed/);
     assert.match(doc, /Do not deploy this app/);
     assert.match(doc, /only database is the local one/);
     const report = renderCheckReport({
       tiers: [
-        { tier: "fast", command: "npm test" },
-        { tier: "targeted", command: "npm test -- --changed" },
+        { tier: "fast", command: "npm test", required: true },
+        { tier: "targeted", command: "npm test -- --changed", required: true },
+        { tier: "sim-unit", command: "bunx turbo run test --filter=@sim/app", required: false },
       ],
       events: [
         { type: "tool_call", data: { toolUseId: "1", name: "Bash", input: { command: "npm test" } } },
@@ -124,9 +126,54 @@ describe("environment profiles", () => {
     assert.match(report, /fast \| passed/);
     assert.match(report, /targeted \| failed \(exit 1\)/);
     assert.match(report, /Required checks not recorded as passed: `targeted`/);
+    assert.match(report, /sim-unit \| not run/);
     const dir = mkdtempSync(path.join(tmpdir(), "kennel-checks-"));
     mkdirSync(path.join(dir, ".kennel"));
     writeFileSync(path.join(dir, ".kennel", "checks.jsonl"), '{"tier":"fast","exitCode":0}\nnot json\n');
     assert.equal(loadChecksFile(dir)[0]?.exitCode, 0);
+  });
+
+  test("clones with a credential helper and keeps shell metacharacters verbatim", () => {
+    const script = cloneScript();
+    assert.match(script, /username=x-access-token/);
+    assert.doesNotMatch(script, /bearer|extraheader|AUTHORIZATION/i);
+    assert.doesNotMatch(script, /ghp_|github_pat_|x-access-token:[^u]/);
+    const command = "echo '${VAR}' \"$VAR\" $(uname) $$";
+    const profile = parseProfile(
+      ["name: dollars", "repos:", "  - https://github.com/example/dollars", "setup:", `  - ${JSON.stringify(command)}`].join("\n"),
+      "dollars.yaml",
+    );
+    const plan = planImage(profile);
+    assert.equal(plan.commands.some((command) => command.includes("$")), false);
+    const decoded = plan.commands.map(decodeRun).join("\n");
+    assert.ok(decoded.includes(command));
+    assert.match(decoded, /username=x-access-token/);
+  });
+
+  test("skips a profile that does not parse and keeps the others", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "kennel-profiles-"));
+    writeFileSync(path.join(dir, "good.yaml"), "name: good\nrepos:\n  - https://github.com/example/good\n");
+    writeFileSync(path.join(dir, "bad.yaml"), "name: [\n");
+    writeFileSync(
+      path.join(dir, "custom.yaml"),
+      ["name: custom", "repos: [https://github.com/example/custom]", "checks:", "  sim-unit:", "    command: bun test", "    default: true", "  full:", "    command: bun run build"].join("\n"),
+    );
+    const lines: string[] = [];
+    const profiles = loadProfiles(dir, (line) => lines.push(line));
+    rmSync(dir, { recursive: true, force: true });
+    assert.deepEqual(profiles.map((profile) => profile.name).sort(), ["custom", "good"]);
+    assert.equal(profiles.find((profile) => profile.name === "custom")?.checks["sim-unit"]?.default, true);
+    assert.equal(profiles.find((profile) => profile.name === "custom")?.checks.full?.default, false);
+    assert.match(lines.join("\n"), /bad\.yaml/);
+  });
+
+  test("redacts secret values and names the image id when a build fails", () => {
+    const text = redactSecrets("token ghp_exampletokenvalue leaked", { GITHUB_TOKEN: "ghp_exampletokenvalue" });
+    assert.equal(text.includes("ghp_exampletokenvalue"), false);
+    assert.match(text, /\[redacted:GITHUB_TOKEN\]/);
+    const failure = buildFailureMessage("im-abc", "");
+    assert.match(failure, /im-abc/);
+    assert.match(failure, /modal image logs im-abc/);
+    assert.match(failure, /no exception text/);
   });
 });

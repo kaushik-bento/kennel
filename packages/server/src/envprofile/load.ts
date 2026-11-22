@@ -2,13 +2,16 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { CHECK_TIERS, type CheckTier, type EnvProfile, type SandboxSize } from "./types.js";
+import { DEFAULT_CHECK_TIERS, type CheckSpec, type EnvProfile, type SandboxSize } from "./types.js";
+
+const tierName = z.string().regex(/^[a-z0-9][a-z0-9-]{0,40}$/);
 
 const checkSchema = z
   .object({
     command: z.string().min(1),
     cpu: z.number().positive().optional(),
     memoryMiB: z.number().int().positive().optional(),
+    default: z.boolean().optional(),
   })
   .strict();
 
@@ -46,14 +49,7 @@ const profileSchema = z
       .optional(),
     setup: z.array(z.string().min(1)).optional(),
     env: z.record(z.string(), z.string()).optional(),
-    checks: z
-      .object({
-        fast: checkSchema.optional(),
-        targeted: checkSchema.optional(),
-        full: checkSchema.optional(),
-      })
-      .strict()
-      .optional(),
+    checks: z.record(tierName, checkSchema).optional(),
     cache: z.array(z.string().min(1)).optional(),
     lockfiles: z.array(z.string().min(1)).optional(),
     deny: z.array(z.string().min(1)).optional(),
@@ -93,7 +89,7 @@ export function parseProfile(text: string, source: string): EnvProfile {
     services: value.services ?? [],
     setup: value.setup ?? [],
     env: value.env ?? {},
-    checks: value.checks ?? {},
+    checks: resolveChecks(value.checks ?? {}),
     cache: value.cache ?? [],
     lockfiles: value.lockfiles ?? [],
     deny: value.deny ?? [],
@@ -104,7 +100,7 @@ export function parseProfile(text: string, source: string): EnvProfile {
   };
 }
 
-export function loadProfiles(dir: string): EnvProfile[] {
+export function loadProfiles(dir: string, log: (line: string) => void = (line) => console.error(line)): EnvProfile[] {
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -112,18 +108,39 @@ export function loadProfiles(dir: string): EnvProfile[] {
     return [];
   }
   const profiles: EnvProfile[] = [];
+  const seen = new Set<string>();
   for (const name of names.sort()) {
     if (!name.endsWith(".yaml") && !name.endsWith(".yml")) continue;
     const file = path.join(dir, name);
     if (!statSync(file).isFile()) continue;
-    profiles.push(parseProfile(readFileSync(file, "utf8"), file));
-  }
-  const seen = new Set<string>();
-  for (const profile of profiles) {
-    if (seen.has(profile.name)) throw new Error(`duplicate environment profile: ${profile.name}`);
-    seen.add(profile.name);
+    try {
+      const profile = parseProfile(readFileSync(file, "utf8"), file);
+      if (seen.has(profile.name)) {
+        log(`[kennel] skipping environment profile ${file}: duplicate name ${profile.name}`);
+        continue;
+      }
+      seen.add(profile.name);
+      profiles.push(profile);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`[kennel] skipping environment profile ${file}: ${message}`);
+    }
   }
   return profiles;
+}
+
+function resolveChecks(raw: Record<string, { command: string; cpu?: number; memoryMiB?: number; default?: boolean }>): Record<string, CheckSpec> {
+  const checks: Record<string, CheckSpec> = {};
+  for (const [name, check] of Object.entries(raw)) {
+    const implied = (DEFAULT_CHECK_TIERS as readonly string[]).includes(name);
+    checks[name] = {
+      command: check.command,
+      ...(check.cpu !== undefined ? { cpu: check.cpu } : {}),
+      ...(check.memoryMiB !== undefined ? { memoryMiB: check.memoryMiB } : {}),
+      default: check.default ?? implied,
+    };
+  }
+  return checks;
 }
 
 /** Compare repository URLs without the scheme, user, or `.git` suffix. */
@@ -143,9 +160,8 @@ export function matchProfile(profiles: EnvProfile[], repo: string): EnvProfile |
 
 export function sessionResources(profile: EnvProfile): SandboxSize {
   if (profile.sandbox?.cpu || profile.sandbox?.memoryMiB) return profile.sandbox;
-  const tiers = (["fast", "targeted"] as CheckTier[])
-    .map((tier) => profile.checks[tier])
-    .filter((check): check is NonNullable<typeof check> => Boolean(check));
+  const defaults = Object.values(profile.checks).filter((check) => check.default);
+  const tiers = defaults.length > 0 ? defaults : Object.values(profile.checks);
   const cpu = tiers.reduce((max, check) => Math.max(max, check.cpu ?? 0), 0);
   const memoryMiB = tiers.reduce((max, check) => Math.max(max, check.memoryMiB ?? 0), 0);
   const size: SandboxSize = {};
@@ -154,9 +170,10 @@ export function sessionResources(profile: EnvProfile): SandboxSize {
   return size;
 }
 
-export function checkList(profile: EnvProfile): Array<{ tier: CheckTier; command: string }> {
-  return CHECK_TIERS.flatMap((tier) => {
-    const check = profile.checks[tier];
-    return check ? [{ tier, command: check.command }] : [];
-  });
+export function checkList(profile: EnvProfile): Array<{ tier: string; command: string; required: boolean }> {
+  return Object.entries(profile.checks).map(([tier, check]) => ({
+    tier,
+    command: check.command,
+    required: check.default,
+  }));
 }
