@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
-import { mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { AgentKind, Permissions } from "@kennel/core";
@@ -106,4 +107,39 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
     }
   }
   await running.agent?.close().catch(() => undefined);
+}
+
+/**
+ * One-time setup of the sandbox HOME (on the session volume).
+ *
+ * - `KENNEL_CODEX_AUTH_JSON`: contents of a ChatGPT-subscription
+ *   `~/.codex/auth.json`. Written only when the volume has no auth.json yet,
+ *   so Codex's own token refreshes on the volume are not overwritten.
+ * - `GITHUB_TOKEN` / `GH_TOKEN`: registers `gh` as the git credential helper
+ *   so private https clones and pushes work.
+ * - A default git identity so agents can commit.
+ */
+export function prepareHome(env: NodeJS.ProcessEnv): void {
+  const home = env.HOME;
+  if (!home) return;
+  mkdirSync(home, { recursive: true });
+  const codexAuth = env.KENNEL_CODEX_AUTH_JSON;
+  if (codexAuth && codexAuth.trim()) {
+    const codexHome = env.CODEX_HOME || path.join(home, ".codex");
+    const authPath = path.join(codexHome, "auth.json");
+    if (!existsSync(authPath)) {
+      mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+      writeFileSync(authPath, codexAuth, { mode: 0o600 });
+      chmodSync(authPath, 0o600);
+    }
+  }
+  const quiet = { stdio: "ignore" as const, env };
+  if (env.GITHUB_TOKEN || env.GH_TOKEN) {
+    spawnSync("gh", ["auth", "setup-git", "--hostname", "github.com"], quiet);
+  }
+  const name = spawnSync("git", ["config", "--global", "user.name"], { env, encoding: "utf8" });
+  if (!name.stdout?.trim()) {
+    spawnSync("git", ["config", "--global", "user.name", env.KENNEL_GIT_NAME || "kennel"], quiet);
+    spawnSync("git", ["config", "--global", "user.email", env.KENNEL_GIT_EMAIL || "kennel@localhost"], quiet);
+  }
 }

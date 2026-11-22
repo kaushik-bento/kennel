@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
 import { buildAdapters } from "./adapters/index.js";
-import { serveRunner } from "./runner/serve.js";
+import { prepareHome, serveRunner } from "./runner/serve.js";
 
 export { serveRunner } from "./runner/serve.js";
 
 async function main(): Promise<void> {
+  prepareHome(process.env);
   const adapters = buildAdapters({
     codexBin: process.env.KENNEL_CODEX_BIN || "codex",
     echoDelayMs: process.env.KENNEL_ECHO_DELAY_MS ? Number(process.env.KENNEL_ECHO_DELAY_MS) : 5,
