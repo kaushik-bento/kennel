@@ -50,7 +50,11 @@ export async function createKennel(options?: {
 export function logReady(config: KennelConfig): void {
   const warning = claudeAuthWarning(process.env);
   if (warning) console.warn(`[kennel] ${warning}`);
-  console.log(`[kennel] claude auth: ${describeClaudeAuth(process.env)}`);
+  if (config.backend === "modal") {
+    console.log(`[kennel] agent auth: from Modal Secret ${config.modalSecret} (not read by the control plane)`);
+  } else {
+    console.log(`[kennel] claude auth: ${describeClaudeAuth(process.env)}`);
+  }
   console.log(`[kennel] listening on http://${config.host}:${config.port}`);
   console.log(`[kennel] data dir: ${config.dataDir}`);
   console.log(`[kennel] max concurrent sessions: ${config.maxConcurrent}`);

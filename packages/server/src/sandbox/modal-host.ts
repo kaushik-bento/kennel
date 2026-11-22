@@ -29,11 +29,11 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
       const name = `kennel-${spec.sessionId}`;
       try {
         const existing = await modal.sandboxes.fromName(config.modalApp, name, envParams);
-        await existing.terminate();
+        await terminateAndWait(existing);
       } catch {
         // No running sandbox with this name.
       }
-      const sandbox = await modal.sandboxes.create(app, image, {
+      const createParams = {
         name,
         volumes: { "/var/kennel": volume },
         secrets: [secret],
@@ -41,7 +41,21 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
         idleTimeoutMs: config.modalSandboxTimeoutMs,
         workdir: "/var/kennel",
         env: { HOME: "/var/kennel/home" },
-      });
+      };
+      // Sandbox names are released asynchronously after terminate, so a
+      // prompt that arrives right after the previous release can still see
+      // "already in use". Retry for a short while instead of failing the session.
+      let sandbox: Awaited<ReturnType<typeof modal.sandboxes.create>> | undefined;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          sandbox = await modal.sandboxes.create(app, image, createParams);
+          break;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (!/already in use/i.test(message) || attempt >= NAME_RETRY_ATTEMPTS) throw err;
+          await sleep(NAME_RETRY_DELAY_MS);
+        }
+      }
       console.log(`[kennel] modal sandbox ${sandbox.sandboxId} volume ${spec.volumeName}`);
       const proc = await sandbox.exec(["node", "/opt/kennel/packages/server/dist/runner.js"], {
         stdout: "pipe",
@@ -62,7 +76,7 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
         },
         close: async () => {
           stderr.close();
-          await sandbox.terminate().catch(() => undefined);
+          await terminateAndWait(sandbox);
         },
       };
     },
@@ -70,6 +84,19 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
       await modal.volumes.delete(volumeName, { allowMissing: true, ...envParams });
     },
   };
+}
+
+const NAME_RETRY_ATTEMPTS = 30;
+const NAME_RETRY_DELAY_MS = 1000;
+const TERMINATE_WAIT_MS = 15_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Terminate and wait (bounded) for the sandbox to exit so its name frees up. */
+async function terminateAndWait(sandbox: { terminate(params: { wait: true }): Promise<number> }): Promise<void> {
+  await Promise.race([sandbox.terminate({ wait: true }).catch(() => undefined), sleep(TERMINATE_WAIT_MS)]);
 }
 
 async function* readLines(stream: AsyncIterable<string>): AsyncGenerator<string> {
