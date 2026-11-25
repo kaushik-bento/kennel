@@ -110,7 +110,11 @@ export class ClaudeAdapter implements AgentAdapter {
       },
     };
     if (options.nativeId) queryOptions.resume = options.nativeId;
-    if (options.model) queryOptions.model = options.model;
+    // Alias "opus" is documented by the Agent SDK (e.g. 0.3.330) as latest Opus.
+    // The adapter runs inside kennel-runner (Modal image or local process), so this
+    // default applies even when the session row has model null. KENNEL_CLAUDE_MODEL
+    // overrides it when present in the runner environment.
+    queryOptions.model = options.model || process.env.KENNEL_CLAUDE_MODEL || "opus";
     if (options.permissions.permissionMode) queryOptions.permissionMode = options.permissions.permissionMode;
     if (options.permissions.permissionMode === "bypassPermissions") {
       queryOptions.allowDangerouslySkipPermissions = true;

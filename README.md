@@ -127,6 +127,8 @@ Claude uses `permissionMode`, `allowedTools`, and `disallowedTools`. `bypassPerm
 
 Claude is given a copy of the process environment with the triage key and webhook URL removed. `CLAUDE_CODE_OAUTH_TOKEN` is the subscription token. `ANTHROPIC_API_KEY` is the API key. `CLAUDE_CODE_USE_VERTEX=1` selects Vertex. On startup, if both the OAuth token and the API key are set, kennel warns that the API key wins.
 
+If `model` is omitted on a Claude session, the adapter defaults to `opus` (the Agent SDK alias for the latest Opus). Set `KENNEL_CLAUDE_MODEL` in the runner environment to change that default, or pass `model` when creating the session.
+
 ## MCP and Grok Bot
 
 The same tools are on `POST /mcp` and in the `kennel-mcp` package, which is a stdio MCP server aimed at `npx`:
