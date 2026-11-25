@@ -106,6 +106,7 @@ describe("claude adapter", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(native, "sess_123");
     assert.equal(seen.options?.resume, "sess_old");
+    assert.equal(seen.options?.model, "claude-sonnet-5-5");
     assert.equal(seen.options?.permissionMode, "acceptEdits");
     assert.equal(seen.options?.includePartialMessages, true);
     assert.deepEqual(seen.options?.allowedTools, ["Read"]);
@@ -184,5 +185,39 @@ describe("claude adapter", () => {
     assert.equal(queryRef?.interrupted, true);
     assert.equal(events.find((event) => event.type === "turn_completed")?.data.status, "interrupted");
     await running.close();
+  });
+
+  it("defaults to opus when no model is set, honors KENNEL_CLAUDE_MODEL, and keeps an explicit model", async () => {
+    const previous = process.env.KENNEL_CLAUDE_MODEL;
+    const start = async (model?: string) => {
+      const seen: { options?: Options } = {};
+      const adapter = new ClaudeAdapter(
+        sdk(async function* (query) {
+          yield { type: "system", subtype: "init", session_id: "sess_m" };
+          await query.nextMessage();
+          yield { type: "result", subtype: "success", session_id: "sess_m", is_error: false, result: "ok" };
+        }, seen),
+      );
+      const running = await adapter.start({
+        cwd: "/tmp/work",
+        nativeId: null,
+        ...(model ? { model } : {}),
+        permissions: {},
+        onEvent: () => undefined,
+        onNativeId: () => undefined,
+      });
+      await running.close();
+      return seen.options?.model;
+    };
+    try {
+      delete process.env.KENNEL_CLAUDE_MODEL;
+      assert.equal(await start(), "opus");
+      process.env.KENNEL_CLAUDE_MODEL = "claude-haiku-4-5";
+      assert.equal(await start(), "claude-haiku-4-5");
+      assert.equal(await start("claude-sonnet-5-5"), "claude-sonnet-5-5");
+    } finally {
+      if (previous === undefined) delete process.env.KENNEL_CLAUDE_MODEL;
+      else process.env.KENNEL_CLAUDE_MODEL = previous;
+    }
   });
 });
