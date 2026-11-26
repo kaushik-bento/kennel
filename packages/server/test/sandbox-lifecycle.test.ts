@@ -75,17 +75,17 @@ describe("claude empty turns", () => {
     return {
       query({ prompt }) {
         const queue: SDKUserMessage[] = [];
-        let wake: (() => void) | null = null;
+        const waiter: { wake: (() => void) | null } = { wake: null };
         void (async () => {
-          for await (const message of prompt) {
+          for await (const message of prompt as AsyncIterable<SDKUserMessage>) {
             queue.push(message);
-            wake?.();
+            waiter.wake?.();
           }
         })();
         async function* run(): AsyncGenerator<unknown> {
           yield { type: "system", subtype: "init", session_id: "sess_e" };
           for (const result of results) {
-            while (queue.length === 0) await new Promise<void>((resolve) => (wake = resolve));
+            while (queue.length === 0) await new Promise<void>((resolve) => (waiter.wake = resolve));
             const message = queue.shift() as SDKUserMessage;
             prompts.push(String(message.message.content));
             yield { session_id: "sess_e", ...result };
@@ -127,6 +127,7 @@ describe("claude empty turns", () => {
     const events: AgentEvent[] = [];
     const running = await new ClaudeAdapter(scriptedSdk([empty, empty], [])).start({
       cwd: "/tmp/work",
+      nativeId: null,
       emptyRetryMs: 5,
       permissions: { permissionMode: "bypassPermissions" },
       onEvent: (event) => events.push(event),
