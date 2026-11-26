@@ -22,7 +22,22 @@ export interface RunnerIo {
  * framed JSON protocol on stdin/stdout; stdout is reserved for that protocol
  * so agent logs stay on stderr.
  */
-export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapter>): Promise<void> {
+export interface RunnerActivity {
+  busy: number;
+  processes: string[];
+}
+
+function procActivity(): RunnerActivity {
+  const busy = busyProcesses(process.pid, readProcs());
+  return { busy: busy.length, processes: busy.slice(0, 10).map((proc) => proc.command) };
+}
+
+export async function serveRunner(
+  io: RunnerIo,
+  adapters: Map<string, AgentAdapter>,
+  options: { activity?: () => RunnerActivity } = {},
+): Promise<void> {
+  const activity = options.activity ?? procActivity;
   const write = (message: unknown) => {
     io.output.write(encodeFrame(message));
   };
@@ -89,8 +104,7 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
       return {};
     }
     if (request.method === "activity") {
-      const busy = busyProcesses(process.pid, readProcs());
-      return { busy: busy.length, processes: busy.slice(0, 10).map((proc) => proc.command) };
+      return { ...activity() };
     }
     if (request.method === "finish") {
       if (!git || !worktreePath) throw new Error("bootstrap before finish");

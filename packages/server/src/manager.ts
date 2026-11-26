@@ -703,7 +703,7 @@ export class SessionManager implements KennelApi {
         if (busy > 0 && idleFor < this.config.sandboxBusyMaxMs) {
           // Background work the agent started is still running: keep the sandbox.
           this.record(sessionId, "status", { state: "idle", queueDepth: 0, sandbox: "kept", busy, processes }, undefined);
-          this.scheduleIdleRelease(sessionId, BUSY_RECHECK_MS);
+          this.scheduleIdleRelease(sessionId, Math.min(BUSY_RECHECK_MS, Math.max(this.config.sandboxIdleMs, 10)));
           return;
         }
         this.idleSince.delete(sessionId);

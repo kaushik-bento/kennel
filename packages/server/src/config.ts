@@ -82,7 +82,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
     .filter((name) => name.length > 0);
   const modalSandboxTimeoutMs = env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS
     ? Number(env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS)
-    : 4 * 60 * 60 * 1000;
+    : 8 * 60 * 60 * 1000;
   if (!Number.isFinite(modalSandboxTimeoutMs) || modalSandboxTimeoutMs < 60_000) {
     throw new Error(`invalid KENNEL_MODAL_SANDBOX_TIMEOUT_MS: ${env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS}`);
   }

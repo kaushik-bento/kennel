@@ -17,7 +17,9 @@ const TICKS_PER_SECOND = 100;
  * live as long as it does. Only processes started this long after the CLI
  * count as work the agent kicked off.
  */
-const STARTUP_GRACE_SECONDS = 15;
+const STARTUP_GRACE_SECONDS = 3;
+/** Long-lived helpers the CLI may start later (MCP servers). Never counted as work. */
+const HELPER = /(^|[\s/@-])mcp([\s/@-]|-server|$)|modelcontextprotocol/i;
 
 export function readProcs(procDir = "/proc"): ProcInfo[] {
   let entries: string[];
@@ -74,6 +76,7 @@ export function busyProcesses(runnerPid: number, procs: ProcInfo[]): ProcInfo[] 
       stack.push(...(children.get(proc.pid) ?? []));
       if (proc.state === "Z" || proc.state === "X") continue;
       if (proc.start < threshold) continue;
+      if (HELPER.test(proc.command)) continue;
       busy.push(proc);
     }
   }

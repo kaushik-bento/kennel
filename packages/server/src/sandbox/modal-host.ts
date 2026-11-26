@@ -40,7 +40,7 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
 
   return {
     async open(spec: ModalOpenSpec): Promise<RunnerStdio> {
-      const volume = await modal.volumes.fromName(spec.volumeName, { createIfMissing: true, ...envParams });
+      const volume = await openVolume(modal, spec.volumeName, envParams);
       let sandboxImage = image;
       if (spec.imageName && spec.imageName !== config.modalImage) {
         try {
@@ -64,7 +64,7 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
         timeoutMs: config.modalSandboxTimeoutMs,
         idleTimeoutMs: config.modalSandboxTimeoutMs,
         workdir: "/var/kennel",
-        env: { HOME: "/var/kennel/home", IS_SANDBOX: "1" },
+        env: sandboxEnv(spec),
         ...(spec.cpu ? { cpu: spec.cpu } : {}),
         ...(spec.memoryMiB ? { memoryMiB: spec.memoryMiB, memoryLimitMiB: spec.memoryMiB } : {}),
       };
@@ -88,7 +88,7 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
         stderr: "pipe",
         mode: "text",
         workdir: "/opt/kennel",
-        env: { HOME: "/var/kennel/home", IS_SANDBOX: "1" },
+        env: sandboxEnv(spec),
       });
       const stderr = createInterface({ input: Readable.from(proc.stderr) });
       stderr.on("line", (line) => {
@@ -117,6 +117,48 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
         return false;
       }
     },
+  };
+}
+
+/**
+ * Session volumes are VolumeFS v2. v1 volumes cap at 500,000 inodes, and one
+ * `bun install` of a large monorepo (node_modules plus the bun cache) writes
+ * more than that, which shows up as ENOSPC with the disk nearly empty.
+ * Existing volumes are opened as whatever version they already are.
+ */
+async function openVolume(
+  modal: { volumes: { fromName(name: string, params?: { environment?: string; createIfMissing?: boolean; version?: 1 | 2 }): Promise<any> } },
+  name: string,
+  envParams: { environment?: string },
+): Promise<any> {
+  try {
+    return await modal.volumes.fromName(name, envParams);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/not ?found|does not exist/i.test(message) && (err as { name?: string })?.name !== "NotFoundError") throw err;
+  }
+  return modal.volumes.fromName(name, { createIfMissing: true, version: 2, ...envParams });
+}
+
+/**
+ * Package manager caches go on the sandbox's ephemeral root disk (hundreds
+ * of GB, no inode cap), not the session volume. Only the worktree and HOME
+ * need to persist between sandboxes. Node gets a heap sized to the sandbox so
+ * a full monorepo tsc does not die at the default ~4 GB.
+ */
+export function sandboxEnv(spec: { memoryMiB?: number }): Record<string, string> {
+  const memoryMiB = spec.memoryMiB ?? 0;
+  const heapMiB = memoryMiB >= 8192 ? Math.floor(memoryMiB * 0.6) : 0;
+  return {
+    HOME: "/var/kennel/home",
+    IS_SANDBOX: "1",
+    BUN_INSTALL_CACHE_DIR: "/tmp/kennel-cache/bun",
+    npm_config_cache: "/tmp/kennel-cache/npm",
+    YARN_CACHE_FOLDER: "/tmp/kennel-cache/yarn",
+    PNPM_STORE_DIR: "/tmp/kennel-cache/pnpm",
+    PIP_CACHE_DIR: "/tmp/kennel-cache/pip",
+    TURBO_CACHE_DIR: "/tmp/kennel-cache/turbo",
+    ...(heapMiB > 0 ? { NODE_OPTIONS: `--max-old-space-size=${heapMiB}` } : {}),
   };
 }
 
