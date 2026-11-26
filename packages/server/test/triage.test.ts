@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { heuristicHit, terminalTurn } from "../src/triage/heuristic.js";
 import { capHeadTail } from "../src/triage/transcript.js";
+import { parseVerdict } from "../src/triage/xai.js";
 import { startApp, type RunningApp } from "./helpers.js";
 
 const apps: RunningApp[] = [];
@@ -35,9 +36,37 @@ describe("triage heuristic", () => {
   });
 });
 
+describe("severity floor", () => {
+  test("raises a waiting agent from info to warn and leaves other severities alone", () => {
+    const waiting = {
+      needsAttention: true,
+      severity: "info",
+      reasons: [{ kind: "agent_question", summary: "asked", evidence: "?" }],
+      suggestedAction: "answer",
+      batchSummary: "Asked a question.",
+      sessionSummary: "Waiting.",
+    };
+    assert.equal(parseVerdict(JSON.stringify(waiting)).severity, "warn");
+    assert.equal(
+      parseVerdict(JSON.stringify({ ...waiting, reasons: [{ kind: "blocked", summary: "stuck", evidence: "approval" }] })).severity,
+      "warn",
+    );
+    assert.equal(parseVerdict(JSON.stringify({ ...waiting, severity: "urgent" })).severity, "urgent");
+    assert.equal(
+      parseVerdict(
+        JSON.stringify({
+          ...waiting,
+          reasons: [{ kind: "scope_drift", summary: "extra file", evidence: "notes.md" }],
+        }),
+      ).severity,
+      "info",
+    );
+  });
+});
+
 describe("attention triage", () => {
   test("a question raises one flag from a single xAI call", async () => {
-    const xai = await mockXai(() => verdict(true));
+    const xai = await mockXai(() => ({ ...verdict(true), severity: "info" }));
     servers.push(xai);
     const app = await startApp({ triageMode: "idle", xaiApiKey: "test-key", xaiEndpoint: xai.url });
     apps.push(app);
@@ -48,6 +77,10 @@ describe("attention triage", () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(xai.requests.length, 1);
     assert.equal(xai.requests[0]?.authorization, "Bearer test-key");
+    const system = (xai.requests[0]?.body as { messages?: Array<{ content?: string }> }).messages?.[0]?.content ?? "";
+    assert.match(system, /urgent: risky_action/);
+    assert.match(system, /warn: the agent is blocked or waiting on a human \(agent_question, blocked\)/);
+    assert.match(system, /info: everything else worth noting/);
     const flags = await app.api("GET", `/flags?sessionId=${id}`);
     assert.equal(flags.body.flags.length, 1);
     assert.equal(flags.body.flags[0].severity, "warn");

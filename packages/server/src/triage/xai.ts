@@ -46,7 +46,11 @@ Return only the JSON object described by the schema.
 batchSummary: 2-4 plain sentences covering every turn in the batch: what the agent did, files changed, commands or tests and their outcome, and the current state.
 sessionSummary: rewrite the previous session summary plus this batch into at most 150 words of overall progress, open issues, and the next step.
 needsAttention is true only when a person should look: the agent asked a question or is waiting, it is blocked, looping, tests failed, it took a risky action, it claimed success without evidence, it drifted from the request, or it errored.
-severity is info, warn, or urgent. reasons cite short evidence from the transcript. suggestedAction is one sentence, or empty when needsAttention is false.`;
+severity:
+- urgent: risky_action, secrets exposure, a destructive operation, or a session error.
+- warn: the agent is blocked or waiting on a human (agent_question, blocked), stuck_or_looping, tests_failing, or claimed_done_unverified.
+- info: everything else worth noting.
+A question or a wait is never info. reasons cite short evidence from the transcript. suggestedAction is one sentence, or empty when needsAttention is false.`;
 
 export interface XaiClientOptions {
   apiKey: string;
@@ -110,9 +114,16 @@ export class XaiClient {
   }
 }
 
+/** A blocked or waiting agent is at least a warning, even if the model said info. */
+export function floorSeverity(severity: AttentionSeverity, reasons: AttentionReason[]): AttentionSeverity {
+  const waiting = reasons.some((reason) => reason.kind === "agent_question" || reason.kind === "blocked");
+  if (waiting && severity === "info") return "warn";
+  return severity;
+}
+
 export function parseVerdict(content: string): TriageVerdict {
   const parsed = JSON.parse(content) as Partial<TriageVerdict>;
-  const severity = ATTENTION_SEVERITIES.includes(parsed.severity as AttentionSeverity)
+  const reported = ATTENTION_SEVERITIES.includes(parsed.severity as AttentionSeverity)
     ? (parsed.severity as AttentionSeverity)
     : "info";
   const reasons = Array.isArray(parsed.reasons)
@@ -128,7 +139,7 @@ export function parseVerdict(content: string): TriageVerdict {
     : [];
   return {
     needsAttention: Boolean(parsed.needsAttention),
-    severity,
+    severity: floorSeverity(reported, reasons),
     reasons,
     suggestedAction: typeof parsed.suggestedAction === "string" ? parsed.suggestedAction : "",
     batchSummary: typeof parsed.batchSummary === "string" ? parsed.batchSummary : "",
