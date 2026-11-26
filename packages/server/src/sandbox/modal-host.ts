@@ -152,7 +152,8 @@ export function sandboxEnv(spec: { memoryMiB?: number }): Record<string, string>
   return {
     HOME: "/var/kennel/home",
     IS_SANDBOX: "1",
-    BUN_INSTALL_CACHE_DIR: "/tmp/kennel-cache/bun",
+    // Root disk, and pre-warmed: env images run `bun install` at build time as root.
+    BUN_INSTALL_CACHE_DIR: "/root/.bun/install/cache",
     npm_config_cache: "/tmp/kennel-cache/npm",
     YARN_CACHE_FOLDER: "/tmp/kennel-cache/yarn",
     PNPM_STORE_DIR: "/tmp/kennel-cache/pnpm",

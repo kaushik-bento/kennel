@@ -50,6 +50,7 @@ const profileSchema = z
     setup: z.array(z.string().min(1)).optional(),
     env: z.record(z.string(), z.string()).optional(),
     checks: z.record(tierName, checkSchema).optional(),
+    ci: z.array(tierName).optional(),
     cache: z.array(z.string().min(1)).optional(),
     lockfiles: z.array(z.string().min(1)).optional(),
     deny: z.array(z.string().min(1)).optional(),
@@ -79,6 +80,9 @@ export function parseProfile(text: string, source: string): EnvProfile {
     throw new Error(`${source}: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "profile"}: ${issue.message}`).join("; ")}`);
   }
   const value = parsed.data;
+  for (const tier of value.ci ?? []) {
+    if (!value.checks?.[tier]) throw new Error(`${source}: ci: tier "${tier}" is not in checks`);
+  }
   return {
     name: value.name,
     ...(value.description ? { description: value.description } : {}),
@@ -90,6 +94,7 @@ export function parseProfile(text: string, source: string): EnvProfile {
     setup: value.setup ?? [],
     env: value.env ?? {},
     checks: resolveChecks(value.checks ?? {}),
+    ci: value.ci ?? [],
     cache: value.cache ?? [],
     lockfiles: value.lockfiles ?? [],
     deny: value.deny ?? [],

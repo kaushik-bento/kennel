@@ -259,7 +259,8 @@ describe("sandbox environment", () => {
   it("puts package caches on the ephemeral disk and sizes the node heap to the sandbox", () => {
     const env = sandboxEnv({ memoryMiB: 16384 });
     assert.equal(env.HOME, "/var/kennel/home");
-    assert.match(env.BUN_INSTALL_CACHE_DIR ?? "", /^\/tmp\//);
+    assert.match(env.BUN_INSTALL_CACHE_DIR ?? "", /^\/root\//);
+    assert.doesNotMatch(Object.values(env).join(" "), /\/var\/kennel\/(?!home)/);
     assert.equal(env.NODE_OPTIONS, "--max-old-space-size=9830");
     assert.equal(sandboxEnv({}).NODE_OPTIONS, undefined);
     assert.equal("ANTHROPIC_API_KEY" in env, false);

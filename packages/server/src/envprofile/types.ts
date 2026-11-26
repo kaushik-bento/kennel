@@ -43,6 +43,8 @@ export interface EnvProfile {
   env: Record<string, string>;
   /** Named check tiers. Names are not limited to fast, targeted, and full. */
   checks: Record<string, CheckSpec>;
+  /** Ordered check tiers that make up the full CI suite for `kennel env ci`. */
+  ci: string[];
   /** Directories that live on the session volume so installs and builds stay warm. */
   cache: string[];
   /** Lockfiles hashed at the default branch. A new hash publishes a new image. */
