@@ -1,3 +1,6 @@
+import { checkList } from "../envprofile/load.js";
+import type { EnvCatalog } from "../envprofile/catalog.js";
+import type { EnvProfile } from "../envprofile/types.js";
 import type { SessionRow } from "../db.js";
 import { RunnerConnection } from "./runner-client.js";
 import type { FinishRequest, ModalHost, ModalOpenSpec, SandboxBackend, SandboxProvision } from "./types.js";
@@ -19,6 +22,11 @@ export class ModalSandboxBackend implements SandboxBackend {
   constructor(
     private readonly host: ModalHost,
     private readonly secretName: string,
+    private readonly catalog: EnvCatalog,
+    private readonly images: {
+      fallbackImage: string;
+      rebuild?: (profile: EnvProfile, hash: string, desired: string) => Promise<void>;
+    },
   ) {}
 
   async provision(input: {
@@ -28,7 +36,7 @@ export class ModalSandboxBackend implements SandboxBackend {
     branch: string;
   }): Promise<SandboxProvision> {
     const volumeName = volumeNameFor(input.sessionId);
-    const connection = await this.open({ sessionId: input.sessionId, volumeName, secretName: this.secretName });
+    const connection = await this.open(input.sessionId, volumeName, input.repo);
     let provisioned = false;
     try {
       const boot = await connection.rpc("bootstrap", {
@@ -37,6 +45,7 @@ export class ModalSandboxBackend implements SandboxBackend {
         baseBranch: input.baseBranch,
         branch: input.branch,
         sessionId: input.sessionId,
+        ...(connection.environment ? { environment: connection.environment } : {}),
       });
       provisioned = true;
       return {
@@ -55,11 +64,7 @@ export class ModalSandboxBackend implements SandboxBackend {
 
   async acquire(session: SessionRow): Promise<RunnerConnection> {
     if (!session.volumeName) throw new Error("modal session is missing its volume");
-    const connection = await this.open({
-      sessionId: session.id,
-      volumeName: session.volumeName,
-      secretName: this.secretName,
-    });
+    const connection = await this.open(session.id, session.volumeName, session.repo);
     try {
       await connection.rpc("bootstrap", {
         root: MOUNT,
@@ -67,6 +72,7 @@ export class ModalSandboxBackend implements SandboxBackend {
         baseBranch: session.baseBranch,
         branch: session.branch,
         sessionId: session.id,
+        ...(connection.environment ? { environment: connection.environment } : {}),
       });
     } catch (err) {
       await connection.release().catch(() => undefined);
@@ -78,12 +84,16 @@ export class ModalSandboxBackend implements SandboxBackend {
   async finish(session: SessionRow, input: FinishRequest) {
     const connection = await this.acquire(session);
     try {
+      const profile = this.catalog.match(session.repo);
       const result = await connection.rpc("finish", {
         branch: session.branch,
         baseBranch: session.baseBranch,
         commitMessage: input.commitMessage,
         openPr: input.openPr,
         repo: session.repo,
+        ...(profile
+          ? { checks: { tiers: checkList(profile), events: input.events ?? [] } }
+          : {}),
       });
       return {
         committed: Boolean(result.committed),
@@ -103,9 +113,24 @@ export class ModalSandboxBackend implements SandboxBackend {
     }
   }
 
-  private async open(spec: ModalOpenSpec): Promise<RunnerConnection> {
+  private async open(sessionId: string, volumeName: string, repo: string): Promise<RunnerConnection & { environment?: unknown }> {
+    const prepared = await this.catalog.prepare(repo, {
+      fallbackImage: this.images.fallbackImage,
+      imageExists: (name) => (this.host.imageExists ? this.host.imageExists(name) : false),
+      ...(this.images.rebuild ? { rebuild: this.images.rebuild } : {}),
+    });
+    const spec: ModalOpenSpec = {
+      sessionId,
+      volumeName,
+      secretName: this.secretName,
+      ...(prepared.decision.profile ? { imageName: prepared.decision.image } : {}),
+      ...(prepared.resources.cpu ? { cpu: prepared.resources.cpu } : {}),
+      ...(prepared.resources.memoryMiB ? { memoryMiB: prepared.resources.memoryMiB } : {}),
+    };
     const io = await this.host.open(spec);
-    return new RunnerConnection(io);
+    const connection = new RunnerConnection(io) as RunnerConnection & { environment?: unknown };
+    if (prepared.environment) connection.environment = prepared.environment;
+    return connection;
   }
 }
 

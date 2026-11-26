@@ -53,6 +53,7 @@ export async function startApp(options?: {
   dataDir?: string;
   backend?: SandboxBackendKind;
   sandboxIdleMs?: number;
+  sandboxBusyMaxMs?: number;
   modalHost?: ModalHost;
   triageMode?: KennelConfig["triageMode"];
   xaiApiKey?: string;
@@ -72,12 +73,15 @@ export async function startApp(options?: {
     echoDelayMs: options?.echoDelayMs ?? 20,
     backend: options?.backend ?? "local",
     sandboxIdleMs: options?.sandboxIdleMs ?? 0,
+    sandboxBusyMaxMs: options?.sandboxBusyMaxMs ?? 0,
+    modalExtraSecrets: [],
     modalApp: "kennel-test",
     modalImage: "kennel-agent",
     modalSecret: "kennel-agent",
     modalSandboxTimeoutMs: 60_000,
     triageMode: options?.triageMode ?? "off",
     triageModel: "grok-4.3",
+    envAutobuild: false,
     ...(options?.xaiApiKey ? { xaiApiKey: options.xaiApiKey } : {}),
     ...(options?.xaiEndpoint ? { xaiEndpoint: options.xaiEndpoint } : {}),
     ...(options?.attentionWebhook ? { attentionWebhook: options.attentionWebhook } : {}),

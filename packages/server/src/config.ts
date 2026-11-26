@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { SandboxBackendKind, TriageMode } from "@kennel/core";
@@ -16,6 +16,13 @@ export interface KennelConfig {
   backend: SandboxBackendKind;
   /** How long an idle session keeps its sandbox before it is torn down. 0 releases immediately. */
   sandboxIdleMs: number;
+  /**
+   * Hard ceiling for keeping an idle sandbox alive because processes the agent
+   * started (bun install, tsc, tests) are still running. Counted from turn end.
+   */
+  sandboxBusyMaxMs: number;
+  /** Extra Modal Secret names attached to every sandbox (eval keys). Missing ones are logged and skipped. */
+  modalExtraSecrets: string[];
   modalApp: string;
   modalImage: string;
   /** Modal Secret *name*. The values are injected into the sandbox and never logged. */
@@ -30,6 +37,12 @@ export interface KennelConfig {
   xaiApiKey?: string;
   attentionWebhook?: string;
   xaiEndpoint?: string;
+  /** Directory of environment profile YAML. Unset when the directory is absent. */
+  envDir?: string;
+  /** When a matched image is missing, build it in the background instead of blocking the session. */
+  envAutobuild: boolean;
+  /** Modal secret with only a GitHub token, used when the process has no GITHUB_TOKEN. */
+  buildSecret?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
@@ -53,13 +66,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
   if (backend !== "local" && backend !== "modal") {
     throw new Error(`invalid KENNEL_BACKEND: ${backend} (expected local or modal)`);
   }
-  const sandboxIdleMs = env.KENNEL_SANDBOX_IDLE_MS ? Number(env.KENNEL_SANDBOX_IDLE_MS) : 0;
+  // Keep the sandbox (and the agent process) for 30 minutes after a turn so
+  // background shells and subagents survive and the next prompt reattaches.
+  const sandboxIdleMs = env.KENNEL_SANDBOX_IDLE_MS ? Number(env.KENNEL_SANDBOX_IDLE_MS) : 30 * 60 * 1000;
   if (!Number.isFinite(sandboxIdleMs) || sandboxIdleMs < 0) {
     throw new Error(`invalid KENNEL_SANDBOX_IDLE_MS: ${env.KENNEL_SANDBOX_IDLE_MS}`);
   }
+  const sandboxBusyMaxMs = env.KENNEL_SANDBOX_BUSY_MAX_MS ? Number(env.KENNEL_SANDBOX_BUSY_MAX_MS) : 3 * 60 * 60 * 1000;
+  if (!Number.isFinite(sandboxBusyMaxMs) || sandboxBusyMaxMs < 0) {
+    throw new Error(`invalid KENNEL_SANDBOX_BUSY_MAX_MS: ${env.KENNEL_SANDBOX_BUSY_MAX_MS}`);
+  }
+  const modalExtraSecrets = (env.KENNEL_MODAL_EXTRA_SECRETS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
   const modalSandboxTimeoutMs = env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS
     ? Number(env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS)
-    : 4 * 60 * 60 * 1000;
+    : 8 * 60 * 60 * 1000;
   if (!Number.isFinite(modalSandboxTimeoutMs) || modalSandboxTimeoutMs < 60_000) {
     throw new Error(`invalid KENNEL_MODAL_SANDBOX_TIMEOUT_MS: ${env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS}`);
   }
@@ -79,13 +102,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
     echoDelayMs,
     backend,
     sandboxIdleMs,
+    sandboxBusyMaxMs,
+    modalExtraSecrets,
     modalApp: env.KENNEL_MODAL_APP || "kennel",
     modalImage: env.KENNEL_MODAL_IMAGE || "kennel-agent",
     modalSecret: env.KENNEL_MODAL_SECRET || "kennel-agent",
     modalSandboxTimeoutMs,
     triageMode,
     triageModel: env.KENNEL_TRIAGE_MODEL || "grok-4.3",
+    envAutobuild: env.KENNEL_ENV_AUTOBUILD !== "0",
   };
+  if (env.KENNEL_BUILD_SECRET) config.buildSecret = env.KENNEL_BUILD_SECRET;
+  const envDir = env.KENNEL_ENV_DIR
+    ? path.resolve(env.KENNEL_ENV_DIR)
+    : existsSync(path.resolve("environments"))
+      ? path.resolve("environments")
+      : undefined;
+  if (envDir) config.envDir = envDir;
   if (env.XAI_API_KEY) config.xaiApiKey = env.XAI_API_KEY;
   if (env.KENNEL_ATTENTION_WEBHOOK) config.attentionWebhook = env.KENNEL_ATTENTION_WEBHOOK;
   if (env.KENNEL_PUBLIC_URL) config.publicUrl = env.KENNEL_PUBLIC_URL;

@@ -4,6 +4,8 @@ import type { SandboxMode } from "@kennel/core";
 import { agentEnv } from "../agent-env.js";
 import type { AgentAdapter, AgentEvent, AgentStartOptions, RunningAgent } from "./types.js";
 
+type SpawnEnv = Record<string, string>;
+
 export interface CodexProcess {
   stdin: { write(chunk: string): boolean; end(): void };
   stdout: NodeJS.ReadableStream;
@@ -45,11 +47,15 @@ export class CodexAdapter implements AgentAdapter {
 
   constructor(
     private readonly bin = "codex",
-    private readonly spawnProcess: (bin: string, cwd: string) => CodexProcess = defaultSpawn,
+    private readonly spawnProcess: (bin: string, cwd: string, env?: SpawnEnv) => CodexProcess = defaultSpawn,
   ) {}
 
   async start(options: AgentStartOptions): Promise<RunningAgent> {
-    const child = this.spawnProcess(this.bin, options.cwd);
+    const child = this.spawnProcess(
+      this.bin,
+      options.cwd,
+      agentEnv(process.env, { strip: options.stripEnv, extra: options.extraEnv }),
+    );
     const client = new CodexClient(child, options);
     await client.handshake();
     const threadId = options.nativeId
@@ -114,6 +120,7 @@ class CodexClient {
       approvalPolicy: this.options.permissions.approvalPolicy ?? "never",
       sandbox: this.options.permissions.sandbox ?? "workspace-write",
       serviceName: "kennel",
+      ...(this.options.testingAddendum ? { developerInstructions: this.options.testingAddendum } : {}),
     });
     const thread = result.thread as { id?: string } | undefined;
     if (!thread?.id) throw new Error("thread/start did not return thread.id");
@@ -370,11 +377,11 @@ function dropUndefined(params: Json): Json {
   return out;
 }
 
-function defaultSpawn(bin: string, cwd: string): CodexProcess {
+function defaultSpawn(bin: string, cwd: string, env?: SpawnEnv): CodexProcess {
   const child: ChildProcessWithoutNullStreams = spawn(bin, ["app-server"], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
-    env: agentEnv(),
+    env: env ?? agentEnv(),
   });
   return child;
 }

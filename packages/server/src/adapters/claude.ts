@@ -13,7 +13,7 @@ export interface ClaudeSdk {
   query(args: { prompt: AsyncIterable<SDKUserMessage>; options?: Options }): ClaudeQuery;
 }
 
-interface ClaudeMessage {
+export interface ClaudeMessage {
   type?: string;
   subtype?: string;
   session_id?: string;
@@ -104,7 +104,7 @@ export class ClaudeAdapter implements AgentAdapter {
       includePartialMessages: true,
       settingSources: ["project"],
       // The SDK replaces the process environment, so pass a copy with triage secrets removed.
-      env: agentEnv(),
+      env: agentEnv(process.env, { strip: options.stripEnv, extra: options.extraEnv }),
       stderr: (line) => {
         options.onEvent({ type: "error", data: { message: line, stream: "stderr" }, raw: line });
       },
@@ -121,14 +121,29 @@ export class ClaudeAdapter implements AgentAdapter {
     }
     if (options.permissions.allowedTools) queryOptions.allowedTools = options.permissions.allowedTools;
     if (options.permissions.disallowedTools) queryOptions.disallowedTools = options.permissions.disallowedTools;
+    if (options.testingAddendum) {
+      queryOptions.systemPrompt = { type: "preset", preset: "claude_code", append: options.testingAddendum };
+    }
 
     const query = sdk.query({ prompt: bridge.iterate(), options: queryOptions });
-    const state = { interruptRequested: false, steerSuppress: 0, sawResult: false, closed: false };
+    const state: ClaudeState = {
+      interruptRequested: false,
+      steerSuppress: 0,
+      sawResult: false,
+      closed: false,
+      lastText: null,
+      emptyRetried: false,
+      emptyTimer: null,
+      redeliver: (text) => bridge.push(userMessage(text, false)),
+      emptyRetryMs: options.emptyRetryMs ?? EMPTY_TURN_RETRY_MS,
+    };
     void pumpClaude(query, options, state);
 
     return {
       nativeId: options.nativeId,
       async deliver(text: string) {
+        state.lastText = text;
+        state.emptyRetried = false;
         bridge.push(userMessage(text, false));
       },
       async steer(text: string) {
@@ -141,6 +156,7 @@ export class ClaudeAdapter implements AgentAdapter {
       },
       async close() {
         state.closed = true;
+        if (state.emptyTimer) clearTimeout(state.emptyTimer);
         bridge.push(null);
         try {
           await query.return?.();
@@ -153,11 +169,40 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 }
 
-async function pumpClaude(
-  query: ClaudeQuery,
-  options: AgentStartOptions,
-  state: { interruptRequested: boolean; steerSuppress: number; sawResult: boolean; closed: boolean },
-): Promise<void> {
+/** How long to wait for a real turn after an empty result before delivering the prompt again. */
+export const EMPTY_TURN_RETRY_MS = 20_000;
+
+interface ClaudeState {
+  interruptRequested: boolean;
+  steerSuppress: number;
+  sawResult: boolean;
+  closed: boolean;
+  /** Text of the prompt being worked on, so an empty turn can be delivered again once. */
+  lastText: string | null;
+  emptyRetried: boolean;
+  emptyTimer: NodeJS.Timeout | null;
+  redeliver: (text: string) => void;
+  emptyRetryMs: number;
+}
+
+/**
+ * A resumed Claude session can answer a prompt with a `result` that ran zero
+ * model turns and used zero tokens (seen after a sandbox was torn down with
+ * background work pending). Reporting that as "completed" looks like the agent
+ * finished. Instead: swallow it, and if no real turn starts within
+ * EMPTY_TURN_RETRY_MS deliver the same prompt once more. A second empty result
+ * is reported as a failed turn, never as a silent success.
+ */
+export function isEmptyResult(message: ClaudeMessage): boolean {
+  if (message.type !== "result" || message.is_error) return false;
+  if (message.subtype !== undefined && message.subtype !== "success") return false;
+  const usage = (message.usage ?? {}) as Record<string, unknown>;
+  const output = Number(usage.output_tokens ?? 0);
+  const input = Number(usage.input_tokens ?? 0) + Number(usage.cache_read_input_tokens ?? 0);
+  return (message.num_turns ?? 0) === 0 && output === 0 && input === 0;
+}
+
+async function pumpClaude(query: ClaudeQuery, options: AgentStartOptions, state: ClaudeState): Promise<void> {
   let nativeId = options.nativeId;
   try {
     for await (const item of query) {
@@ -165,6 +210,41 @@ async function pumpClaude(
       if (message.session_id && message.session_id !== nativeId) {
         nativeId = message.session_id;
         options.onNativeId(message.session_id);
+      }
+      if (state.emptyTimer && (message.type === "assistant" || message.type === "stream_event")) {
+        // The real turn started on its own; no need to deliver again.
+        clearTimeout(state.emptyTimer);
+        state.emptyTimer = null;
+      }
+      if (isEmptyResult(message) && !state.interruptRequested && state.steerSuppress === 0) {
+        if (!state.emptyRetried && state.lastText !== null) {
+          state.emptyRetried = true;
+          const text = state.lastText;
+          options.onEvent({
+            type: "error",
+            data: { message: "agent returned an empty turn (0 model turns, 0 tokens); waiting, then delivering the prompt again", stream: "kennel" },
+            raw: message,
+          });
+          if (state.emptyTimer) clearTimeout(state.emptyTimer);
+          state.emptyTimer = setTimeout(() => {
+            state.emptyTimer = null;
+            if (!state.closed) state.redeliver(text);
+          }, state.emptyRetryMs);
+          continue;
+        }
+        state.sawResult = true;
+        options.onEvent({
+          type: "turn_completed",
+          data: {
+            status: "failed",
+            error: "agent returned an empty turn twice (0 model turns, 0 tokens)",
+            usage: message.usage,
+            numTurns: message.num_turns,
+            subtype: message.subtype,
+          },
+          raw: message,
+        });
+        continue;
       }
       for (const event of normalizeClaude(message, state)) {
         if (event.type === "turn_completed") state.sawResult = true;

@@ -45,7 +45,7 @@ curl -sS -H "Authorization: Bearer $KENNEL_TOKEN" \
    - `OPENAI_API_KEY`, or Codex's `~/.codex` auth if you bake it into the volume another way
    - `GITHUB_TOKEN` so `gh pr create` can open a pull request
 
-3. Run the control plane with `KENNEL_BACKEND=modal`, plus `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for the Modal SDK. Optional: `KENNEL_MODAL_APP`, `KENNEL_MODAL_IMAGE`, `KENNEL_MODAL_ENVIRONMENT`, `KENNEL_MODAL_SANDBOX_TIMEOUT_MS` (default 4 hours; Modal's own default of 5 minutes is too short for a coding turn).
+3. Run the control plane with `KENNEL_BACKEND=modal`, plus `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for the Modal SDK. Optional: `KENNEL_MODAL_APP`, `KENNEL_MODAL_IMAGE`, `KENNEL_MODAL_ENVIRONMENT`, `KENNEL_MODAL_SANDBOX_TIMEOUT_MS` (default 8 hours; Modal's own default of 5 minutes is too short for a coding turn), and `KENNEL_MODAL_EXTRA_SECRETS`, a comma list of extra Modal Secrets (for example eval keys such as `openai-eval-key,fish-audio-api-key`) attached to every sandbox by name. A missing one is logged and skipped.
 
 `deploy/gcp/startup.sh` is an Ubuntu 24.04 boot script for that control plane. It installs Node 22 and git, clones kennel, reads `kennel-token`, `modal-token-id`, and `modal-token-secret` from GCP Secret Manager, and runs kennel under systemd. It does not install Claude Code or Codex on the VM.
 
@@ -59,7 +59,11 @@ A Modal tunnel would expose an HTTP port, a public URL, and a second credential.
 
 `POST /sessions` creates a Volume named `kennel-<id>`, mounts it at `/var/kennel`, clones the repo, and adds the worktree. `HOME` inside the sandbox is `/var/kennel/home`, so `~/.claude` and `~/.codex` are on the volume. The sandbox is then terminated. The session is idle.
 
-The next prompt creates a new sandbox on the same volume and resumes the native Claude session id or Codex thread id. When a turn finishes and the queue is empty, kennel releases the sandbox again. `KENNEL_SANDBOX_IDLE_MS` (default `0`) is how long to wait before that release. Modal's `timeoutMs` is only a backstop for a leaked sandbox.
+When a turn finishes and the queue is empty, kennel keeps the sandbox and the agent process for `KENNEL_SANDBOX_IDLE_MS` (default 30 minutes). A prompt in that window goes to the same sandbox and the same agent process, so background shells and subagents keep running. When the window ends, kennel asks the runner for live processes the agent started (bun install, tsc, test runs, background shells). While there are any, the sandbox stays up, checked every minute, up to `KENNEL_SANDBOX_BUSY_MAX_MS` (default 3 hours) after the turn ended. Then the sandbox is released; the next prompt creates a new sandbox on the same volume and resumes the native Claude session id or Codex thread id. A turn the agent starts on its own while idle (for example after a background task finishes) shows the session as running and resets the window. Set `KENNEL_SANDBOX_IDLE_MS=0` to release right after each turn. Modal's `timeoutMs` is only a backstop for a leaked sandbox.
+
+Session volumes are created as Modal VolumeFS v2. v1 volumes cap at 500,000 inodes, and one `bun install` of a large monorepo writes more than that (node_modules plus the bun cache), which fails as ENOSPC with the disk nearly empty. Package manager caches (`BUN_INSTALL_CACHE_DIR` at `/root/.bun/install/cache`, which env images pre-warm, and npm, yarn, pnpm, pip, turbo under `/tmp/kennel-cache`) stay on the sandbox's ephemeral root disk. Node gets `--max-old-space-size` at 60% of the sandbox memory so a full monorepo `tsc` does not stop at the default heap.
+
+The base image has bun (pinned in `deploy/modal/Dockerfile`), Playwright Chromium with its system libraries and fonts (`PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`), and build tools. When an env profile image for the current lockfile is not published yet, kennel uses the newest image built for one of the last 8 lockfile revisions and tells the agent to reinstall dependencies, before it falls back to the base image.
 
 Filesystem snapshots are a poor fit for this state: they exclude mounted volumes, and they expire (30 days by default). The Volume is the durable copy.
 
@@ -150,6 +154,29 @@ In Grok Bot, add a custom connector either as a remote MCP server (`http://<host
 `permissionMode: "bypassPermissions"`, Codex `approvalPolicy: "never"`, and `sandbox: "danger-full-access"` let the agent run commands and write files as the sandbox user. On the local backend that user is the kennel host user, so the blast radius is the host. On Modal the blast radius is that sandbox plus whatever the Modal Secret can reach (GitHub, the model providers, and the repo). Do not put production cloud credentials, database passwords, or broad cloud IAM keys on the host or in the agent secret. Prefer a GitHub token that can push one fork, and a model credential that can only run the agent.
 
 Bind the control plane to localhost and put TLS and a network policy in front if anything other than the orchestrator can route to it. The Modal tokens on the control plane can create sandboxes; treat them like the kennel token.
+
+## Environment profiles
+
+A profile teaches a session how to run a repo's tests. Profiles are YAML files in `KENNEL_ENV_DIR` (or `./environments` when that directory exists). Each one matches a repository URL and describes apt packages, language runtimes, local services, setup commands, check tiers, and cache directories. `environments/example.yaml` is a generic example. Keep real profiles outside this repository.
+
+`kennel env build <profile>` hashes the lockfiles named in the profile at the repo's default branch and publishes a Modal image `kennel-env-<profile>-<hash>`. The build clones that commit, runs the setup commands, and snapshots the local database directory into the image. A changed lockfile produces a new hash, so the next build does not reuse the old image. The control plane does the same check when a session starts. If that image is missing or the lookup fails, the session uses `kennel-agent`, logs the reason, and can rebuild in the background (`KENNEL_ENV_AUTOBUILD=0` disables the rebuild). The session is not blocked on the build. A profile file that does not parse is logged and skipped so one bad file does not stop the service.
+
+### Running a pull request's CI on Modal
+
+`kennel env ci <profile> --branch <branch>` runs the profile's CI suite against one branch in a single Modal sandbox started from the profile's environment image, instead of on hosted CI runners. The suite is the ordered `ci:` list of check tiers in the profile (override with `--tiers a,b`). Each tier runs with its own timeout (`--timeout`, default 45 minutes); a failed `install` tier skips the rest. The sandbox is sized for the largest tier (`cpu`, `memoryMiB`), or `--cpu` and `--memory`. It gets the build secret (`KENNEL_BUILD_SECRET`, for the clone) and `KENNEL_MODAL_EXTRA_SECRETS`, never the agent secret. Output is a pass, fail, or timeout line per tier with test (vitest and bun test), tsc error, and biome error counts; logs go to `$KENNEL_DATA_DIR/ci/` and `--out result.json` writes the same as JSON. The exit code is 0 only when every tier passed.
+
+```bash
+KENNEL_ENV_DIR=/var/kennel/profiles KENNEL_MODAL_IMAGE=kennel-agent-v2 KENNEL_BUILD_SECRET=kennel-build \
+  node packages/server/dist/index.js env ci tag --branch fix/ci-powerbi-and-sso-jit --out /tmp/ci.json
+```
+
+An agent in a kennel session can be asked to run the same suite: "Run `kennel env ci tag --branch <branch>` from the control plane, or in this sandbox run each tier in the profile's `ci:` list in order and report pass/fail and test counts per tier."
+
+The image build does not receive the agent secret. It receives `REPO_URL`, `GIT_SHA`, and a GitHub token: `GITHUB_TOKEN` or `GH_TOKEN` from the process, or the Modal secret named by `KENNEL_BUILD_SECRET` when the process has neither. Build logs are printed with those secret values redacted. A failed build names the image id and the command `modal image logs <id>`.
+
+On a matched image, the first sandbox for a session copies the database snapshot onto the session volume and starts the local services. Nothing in the profile should point at a remote database. The agent receives `KENNEL_TESTING.md` in the worktree and, for Claude, the same text appended to its system prompt. Check tiers can be any name. A tier with `default: true` is part of the gate that must pass; `fast` and `targeted` are in that gate when `default` is omitted. `finish` adds a Kennel checks section to the pull request body from `.kennel/checks.jsonl` and from commands seen in the session. Those paths are left out of the commit.
+
+The sandbox size is the profile's `sandbox` block, or the larger of the `fast` and `targeted` tiers. The `full` tier can ask for more CPU and memory than the session has.
 
 ## Develop
 

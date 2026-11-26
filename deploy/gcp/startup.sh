@@ -83,6 +83,10 @@ install -d -o root -g kennel -m 750 /etc/kennel
   write_env KENNEL_MODAL_APP "${KENNEL_MODAL_APP:-kennel}"
   write_env KENNEL_MODAL_IMAGE "${KENNEL_MODAL_IMAGE:-kennel-agent}"
   write_env KENNEL_MODAL_SECRET "${KENNEL_MODAL_SECRET:-kennel-agent}"
+  # Eval keys live in their own Modal Secrets, attached by name next to kennel-agent.
+  write_env KENNEL_MODAL_EXTRA_SECRETS "${KENNEL_MODAL_EXTRA_SECRETS:-openai-eval-key,fish-audio-api-key}"
+  write_env KENNEL_SANDBOX_IDLE_MS "${KENNEL_SANDBOX_IDLE_MS:-1800000}"
+  write_env KENNEL_SANDBOX_BUSY_MAX_MS "${KENNEL_SANDBOX_BUSY_MAX_MS:-10800000}"
   if url=$(fetch_secret kennel-public-url 2>/dev/null); then
     write_env KENNEL_PUBLIC_URL "$url"
   fi

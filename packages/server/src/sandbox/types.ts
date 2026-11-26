@@ -12,12 +12,15 @@ export interface SandboxProvision {
 export interface FinishRequest {
   commitMessage: string;
   openPr: boolean;
+  events?: Array<{ type: string; data: Record<string, unknown> }>;
 }
 
 export interface AgentConnection {
   sandboxId: string | null;
   startAgent(options: AgentStartOptions & { kind: AgentKind }): Promise<RunningAgent>;
   release(): Promise<void>;
+  /** Processes the agent started that are still running in the sandbox. Absent on backends that cannot tell. */
+  activity?(): Promise<{ busy: number; processes: string[] }>;
 }
 
 /**
@@ -48,6 +51,11 @@ export interface ModalOpenSpec {
   sessionId: string;
   volumeName: string;
   secretName: string;
+  /** Extra Modal Secret names (eval keys). */
+  extraSecretNames?: string[];
+  imageName?: string;
+  cpu?: number;
+  memoryMiB?: number;
 }
 
 /**
@@ -58,4 +66,6 @@ export interface ModalOpenSpec {
 export interface ModalHost {
   open(spec: ModalOpenSpec): Promise<RunnerStdio>;
   deleteVolume(volumeName: string): Promise<void>;
+  /** False when that published image cannot be resolved. */
+  imageExists?(name: string): Promise<boolean>;
 }
