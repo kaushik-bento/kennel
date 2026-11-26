@@ -152,8 +152,12 @@ function runtimeCommand(name: EnvProfile["runtimes"][number]["name"], version: s
     return `curl -fsSL https://deb.nodesource.com/setup_${major}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*`;
   }
   if (name === "bun") {
-    const pin = version ? `export BUN_VERSION=${shellArg(version)}; ` : "";
-    return `${pin}curl -fsSL https://bun.sh/install | bash && ln -sf /root/.bun/bin/bun /usr/local/bin/bun`;
+    // The installer takes the version as an argument (bun-vX.Y.Z); BUN_VERSION
+    // is ignored. Install outside HOME, which the agent does not share, and
+    // link bunx too. Skip when the base image already has this version.
+    const tag = version ? ` -s ${shellArg(`bun-v${version.replace(/^v/, "")}`)}` : "";
+    const have = version ? `[ "$(bun --version 2>/dev/null)" = ${shellArg(version.replace(/^v/, ""))} ] || ` : "";
+    return `${have}(curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local/bun bash${tag}) && ln -sf /usr/local/bun/bin/bun /usr/local/bin/bun && ln -sf /usr/local/bun/bin/bun /usr/local/bin/bunx && bun --version`;
   }
   if (name === "uv") {
     return "curl -LsSf https://astral.sh/uv/install.sh | sh && ln -sf /root/.local/bin/uv /usr/local/bin/uv";

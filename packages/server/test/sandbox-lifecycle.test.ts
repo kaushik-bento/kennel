@@ -13,7 +13,8 @@ import { buildAdapters } from "../src/adapters/index.js";
 import type { AgentEvent } from "../src/adapters/types.js";
 import { loadConfig } from "../src/config.js";
 import { hashLockfiles, imageName } from "../src/envprofile/hash.js";
-import { loadProfiles, matchProfile } from "../src/envprofile/load.js";
+import { planImage } from "../src/envprofile/image-plan.js";
+import { loadProfiles, matchProfile, parseProfile } from "../src/envprofile/load.js";
 import { selectSessionImage } from "../src/envprofile/select.js";
 import { busyProcesses, readProcs, type ProcInfo } from "../src/runner/activity.js";
 import { serveRunner, type RunnerActivity } from "../src/runner/serve.js";
@@ -283,5 +284,21 @@ describe("sandbox environment", () => {
     assert.equal(decision.stale, true);
     assert.equal(decision.image, imageName(profile, hashLockfiles(older[0]!)));
     assert.equal(decision.desired, imageName(profile, hashLockfiles(current)));
+  });
+
+  it("pins the bun version the profile asks for and links bunx", () => {
+    const profile = parseProfile(
+      ["name: buntest", "repos: [https://github.com/example/bun]", "runtimes:", "  - name: bun", '    version: "1.4.4"'].join("\n"),
+      "buntest.yaml",
+    );
+    const commands = planImage(profile)
+      .commands.map((command) => {
+        const encoded = /^RUN echo (\S+) \| base64 -d \| bash$/.exec(command)?.[1];
+        return encoded ? Buffer.from(encoded, "base64").toString("utf8") : command;
+      })
+      .join("\n");
+    assert.match(commands, /bash -s 'bun-v1\.4\.4'/);
+    assert.match(commands, /\/usr\/local\/bin\/bunx/);
+    assert.doesNotMatch(commands, /BUN_VERSION/);
   });
 });

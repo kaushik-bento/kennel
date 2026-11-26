@@ -45,7 +45,7 @@ curl -sS -H "Authorization: Bearer $KENNEL_TOKEN" \
    - `OPENAI_API_KEY`, or Codex's `~/.codex` auth if you bake it into the volume another way
    - `GITHUB_TOKEN` so `gh pr create` can open a pull request
 
-3. Run the control plane with `KENNEL_BACKEND=modal`, plus `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for the Modal SDK. Optional: `KENNEL_MODAL_APP`, `KENNEL_MODAL_IMAGE`, `KENNEL_MODAL_ENVIRONMENT`, `KENNEL_MODAL_SANDBOX_TIMEOUT_MS` (default 4 hours; Modal's own default of 5 minutes is too short for a coding turn).
+3. Run the control plane with `KENNEL_BACKEND=modal`, plus `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for the Modal SDK. Optional: `KENNEL_MODAL_APP`, `KENNEL_MODAL_IMAGE`, `KENNEL_MODAL_ENVIRONMENT`, `KENNEL_MODAL_SANDBOX_TIMEOUT_MS` (default 8 hours; Modal's own default of 5 minutes is too short for a coding turn), and `KENNEL_MODAL_EXTRA_SECRETS`, a comma list of extra Modal Secrets (for example eval keys such as `openai-eval-key,fish-audio-api-key`) attached to every sandbox by name. A missing one is logged and skipped.
 
 `deploy/gcp/startup.sh` is an Ubuntu 24.04 boot script for that control plane. It installs Node 22 and git, clones kennel, reads `kennel-token`, `modal-token-id`, and `modal-token-secret` from GCP Secret Manager, and runs kennel under systemd. It does not install Claude Code or Codex on the VM.
 
@@ -59,7 +59,11 @@ A Modal tunnel would expose an HTTP port, a public URL, and a second credential.
 
 `POST /sessions` creates a Volume named `kennel-<id>`, mounts it at `/var/kennel`, clones the repo, and adds the worktree. `HOME` inside the sandbox is `/var/kennel/home`, so `~/.claude` and `~/.codex` are on the volume. The sandbox is then terminated. The session is idle.
 
-The next prompt creates a new sandbox on the same volume and resumes the native Claude session id or Codex thread id. When a turn finishes and the queue is empty, kennel releases the sandbox again. `KENNEL_SANDBOX_IDLE_MS` (default `0`) is how long to wait before that release. Modal's `timeoutMs` is only a backstop for a leaked sandbox.
+When a turn finishes and the queue is empty, kennel keeps the sandbox and the agent process for `KENNEL_SANDBOX_IDLE_MS` (default 30 minutes). A prompt in that window goes to the same sandbox and the same agent process, so background shells and subagents keep running. When the window ends, kennel asks the runner for live processes the agent started (bun install, tsc, test runs, background shells). While there are any, the sandbox stays up, checked every minute, up to `KENNEL_SANDBOX_BUSY_MAX_MS` (default 3 hours) after the turn ended. Then the sandbox is released; the next prompt creates a new sandbox on the same volume and resumes the native Claude session id or Codex thread id. A turn the agent starts on its own while idle (for example after a background task finishes) shows the session as running and resets the window. Set `KENNEL_SANDBOX_IDLE_MS=0` to release right after each turn. Modal's `timeoutMs` is only a backstop for a leaked sandbox.
+
+Session volumes are created as Modal VolumeFS v2. v1 volumes cap at 500,000 inodes, and one `bun install` of a large monorepo writes more than that (node_modules plus the bun cache), which fails as ENOSPC with the disk nearly empty. Package manager caches (`BUN_INSTALL_CACHE_DIR`, npm, yarn, pnpm, pip, turbo) point at `/tmp/kennel-cache` on the sandbox's ephemeral root disk. Node gets `--max-old-space-size` at 60% of the sandbox memory so a full monorepo `tsc` does not stop at the default heap.
+
+The base image has bun (pinned in `deploy/modal/Dockerfile`), Playwright Chromium with its system libraries and fonts (`PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`), and build tools. When an env profile image for the current lockfile is not published yet, kennel uses the newest image built for one of the last 8 lockfile revisions and tells the agent to reinstall dependencies, before it falls back to the base image.
 
 Filesystem snapshots are a poor fit for this state: they exclude mounted volumes, and they expire (30 days by default). The Volume is the durable copy.
 
