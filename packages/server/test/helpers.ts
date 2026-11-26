@@ -53,6 +53,7 @@ export async function startApp(options?: {
   dataDir?: string;
   backend?: SandboxBackendKind;
   sandboxIdleMs?: number;
+  sandboxBusyMaxMs?: number;
   modalHost?: ModalHost;
   triageMode?: KennelConfig["triageMode"];
   xaiApiKey?: string;
@@ -72,6 +73,8 @@ export async function startApp(options?: {
     echoDelayMs: options?.echoDelayMs ?? 20,
     backend: options?.backend ?? "local",
     sandboxIdleMs: options?.sandboxIdleMs ?? 0,
+    sandboxBusyMaxMs: options?.sandboxBusyMaxMs ?? 0,
+    modalExtraSecrets: [],
     modalApp: "kennel-test",
     modalImage: "kennel-agent",
     modalSecret: "kennel-agent",

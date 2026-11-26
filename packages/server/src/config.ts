@@ -16,6 +16,13 @@ export interface KennelConfig {
   backend: SandboxBackendKind;
   /** How long an idle session keeps its sandbox before it is torn down. 0 releases immediately. */
   sandboxIdleMs: number;
+  /**
+   * Hard ceiling for keeping an idle sandbox alive because processes the agent
+   * started (bun install, tsc, tests) are still running. Counted from turn end.
+   */
+  sandboxBusyMaxMs: number;
+  /** Extra Modal Secret names attached to every sandbox (eval keys). Missing ones are logged and skipped. */
+  modalExtraSecrets: string[];
   modalApp: string;
   modalImage: string;
   /** Modal Secret *name*. The values are injected into the sandbox and never logged. */
@@ -59,10 +66,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
   if (backend !== "local" && backend !== "modal") {
     throw new Error(`invalid KENNEL_BACKEND: ${backend} (expected local or modal)`);
   }
-  const sandboxIdleMs = env.KENNEL_SANDBOX_IDLE_MS ? Number(env.KENNEL_SANDBOX_IDLE_MS) : 0;
+  // Keep the sandbox (and the agent process) for 30 minutes after a turn so
+  // background shells and subagents survive and the next prompt reattaches.
+  const sandboxIdleMs = env.KENNEL_SANDBOX_IDLE_MS ? Number(env.KENNEL_SANDBOX_IDLE_MS) : 30 * 60 * 1000;
   if (!Number.isFinite(sandboxIdleMs) || sandboxIdleMs < 0) {
     throw new Error(`invalid KENNEL_SANDBOX_IDLE_MS: ${env.KENNEL_SANDBOX_IDLE_MS}`);
   }
+  const sandboxBusyMaxMs = env.KENNEL_SANDBOX_BUSY_MAX_MS ? Number(env.KENNEL_SANDBOX_BUSY_MAX_MS) : 3 * 60 * 60 * 1000;
+  if (!Number.isFinite(sandboxBusyMaxMs) || sandboxBusyMaxMs < 0) {
+    throw new Error(`invalid KENNEL_SANDBOX_BUSY_MAX_MS: ${env.KENNEL_SANDBOX_BUSY_MAX_MS}`);
+  }
+  const modalExtraSecrets = (env.KENNEL_MODAL_EXTRA_SECRETS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
   const modalSandboxTimeoutMs = env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS
     ? Number(env.KENNEL_MODAL_SANDBOX_TIMEOUT_MS)
     : 4 * 60 * 60 * 1000;
@@ -85,6 +102,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): KennelConfig {
     echoDelayMs,
     backend,
     sandboxIdleMs,
+    sandboxBusyMaxMs,
+    modalExtraSecrets,
     modalApp: env.KENNEL_MODAL_APP || "kennel",
     modalImage: env.KENNEL_MODAL_IMAGE || "kennel-agent",
     modalSecret: env.KENNEL_MODAL_SECRET || "kennel-agent",

@@ -19,6 +19,8 @@ export interface AgentStartOptions {
   testingAddendum?: string;
   extraEnv?: Record<string, string>;
   stripEnv?: string[];
+  /** Claude: wait this long after an empty result before delivering the prompt again. Tests shorten it. */
+  emptyRetryMs?: number;
 }
 
 export interface RunningAgent {

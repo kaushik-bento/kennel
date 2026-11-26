@@ -56,6 +56,18 @@ export class RunnerConnection implements AgentConnection {
     };
   }
 
+  /** Old runners do not know this method; treat them as idle. */
+  async activity(): Promise<{ busy: number; processes: string[] }> {
+    try {
+      const result = await this.rpc("activity", {});
+      const busy = Number(result.busy ?? 0);
+      const processes = Array.isArray(result.processes) ? result.processes.map(String) : [];
+      return { busy: Number.isFinite(busy) ? busy : 0, processes };
+    } catch {
+      return { busy: 0, processes: [] };
+    }
+  }
+
   async rpc(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     const id = this.nextId++;
     const response = new Promise<Record<string, unknown>>((resolve, reject) => {

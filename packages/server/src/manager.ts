@@ -49,6 +49,8 @@ export class SessionManager implements KennelApi {
   private readonly live = new Map<string, LiveSession>();
 
   private readonly idleTimers = new Map<string, NodeJS.Timeout>();
+  /** When each kept sandbox went idle, for the busy hard limit. */
+  private readonly idleSince = new Map<string, number>();
   private readonly releasing = new Map<string, Promise<void>>();
   private readonly triageTail = new Map<string, Promise<void>>();
   private readonly attention: AttentionService | null;
@@ -567,6 +569,20 @@ export class SessionManager implements KennelApi {
     if (!session || session.deletedAt) return;
     const live = this.live.get(sessionId);
     if (sourceLive && live !== sourceLive) return;
+    if (
+      live &&
+      !live.turnActive &&
+      !live.provisioning &&
+      session.state === "idle" &&
+      (event.type === "message_delta" || event.type === "tool_call" || event.type === "tool_result")
+    ) {
+      // The agent started a turn on its own, for example to read a finished
+      // background task. Show it as running and keep the sandbox.
+      this.cancelIdleRelease(sessionId);
+      live.turnActive = true;
+      this.db.setState(sessionId, "running", null);
+      this.record(sessionId, "status", { state: "running", queueDepth: this.db.queueDepth(sessionId), autonomous: true }, undefined);
+    }
     if (event.type === "turn_completed") {
       const promptId = live?.currentPromptId ?? null;
       const status = String(event.data.status ?? "completed");
@@ -664,28 +680,53 @@ export class SessionManager implements KennelApi {
     await live.conn.release().catch(() => undefined);
   }
 
-  private scheduleIdleRelease(sessionId: string): void {
-    this.cancelIdleRelease(sessionId);
-    const run = () => {
+  private scheduleIdleRelease(sessionId: string, delayMs = this.config.sandboxIdleMs): void {
+    this.cancelIdleRelease(sessionId, true);
+    if (!this.idleSince.has(sessionId)) this.idleSince.set(sessionId, Date.now());
+    const run = async () => {
       this.idleTimers.delete(sessionId);
-      void this.actor.run(async () => {
+      // Ask the sandbox outside the actor: a slow RPC must not stall other sessions.
+      const probe = this.live.get(sessionId);
+      let busy = 0;
+      let processes: string[] = [];
+      if (probe && !probe.turnActive && probe.conn.activity) {
+        const activity = await probe.conn.activity().catch(() => ({ busy: 0, processes: [] as string[] }));
+        busy = activity.busy;
+        processes = activity.processes;
+      }
+      await this.actor.run(async () => {
         const session = this.db.getSession(sessionId);
         const live = this.live.get(sessionId);
         if (!session || session.deletedAt || session.state !== "idle" || live?.turnActive) return;
         if (!live) return;
+        const idleFor = Date.now() - (this.idleSince.get(sessionId) ?? Date.now());
+        if (busy > 0 && idleFor < this.config.sandboxBusyMaxMs) {
+          // Background work the agent started is still running: keep the sandbox.
+          this.record(sessionId, "status", { state: "idle", queueDepth: 0, sandbox: "kept", busy, processes }, undefined);
+          this.scheduleIdleRelease(sessionId, BUSY_RECHECK_MS);
+          return;
+        }
+        this.idleSince.delete(sessionId);
         this.live.delete(sessionId);
         await this.releaseLive(live);
         this.db.setSandboxId(sessionId, null);
+        this.record(
+          sessionId,
+          "status",
+          { state: "idle", queueDepth: 0, sandbox: "released", ...(busy > 0 ? { busy, reason: "busy limit reached" } : {}) },
+          undefined,
+        );
       });
     };
-    if (this.config.sandboxIdleMs <= 0) {
-      run();
+    if (delayMs <= 0) {
+      void run();
       return;
     }
-    this.idleTimers.set(sessionId, setTimeout(run, this.config.sandboxIdleMs));
+    this.idleTimers.set(sessionId, setTimeout(() => void run(), delayMs));
   }
 
-  private cancelIdleRelease(sessionId: string): void {
+  private cancelIdleRelease(sessionId: string, keepIdleSince = false): void {
+    if (!keepIdleSince) this.idleSince.delete(sessionId);
     const timer = this.idleTimers.get(sessionId);
     if (!timer) return;
     clearTimeout(timer);
@@ -720,6 +761,9 @@ export class SessionManager implements KennelApi {
     return heuristicHit(finalAssistantText(recent));
   }
 }
+
+/** How often a kept sandbox with background work is asked again. */
+const BUSY_RECHECK_MS = 60_000;
 
 function eventReadOptions(opts: EventQuery): { limit: number; types?: EventQuery["types"]; includeRaw: boolean } {
   const requested = opts.limit ?? 200;

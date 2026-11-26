@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline";
+import { busyProcesses, readProcs } from "./activity.js";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -86,6 +87,10 @@ export async function serveRunner(io: RunnerIo, adapters: Map<string, AgentAdapt
       if (running.agent) await running.agent.close().catch(() => undefined);
       running.agent = null;
       return {};
+    }
+    if (request.method === "activity") {
+      const busy = busyProcesses(process.pid, readProcs());
+      return { busy: busy.length, processes: busy.slice(0, 10).map((proc) => proc.command) };
     }
     if (request.method === "finish") {
       if (!git || !worktreePath) throw new Error("bootstrap before finish");

@@ -6,6 +6,8 @@ export interface SelectImageInput {
   profile: EnvProfile | null;
   /** Null when the lockfiles could not be read. */
   lockfiles: LockfileSnapshot[] | null;
+  /** Older revisions of the same lockfiles, newest first. Tried when the exact image is missing. */
+  previousLockfiles?: LockfileSnapshot[][];
   imageExists: (name: string) => Promise<boolean> | boolean;
   /** Start a build for the desired tag. Must not be awaited by the caller of selectSessionImage. */
   rebuild?: (profile: EnvProfile, hash: string, desired: string) => Promise<void>;
@@ -37,14 +39,32 @@ export async function selectSessionImage(input: SelectImageInput): Promise<Image
     return { image: input.fallbackImage, fallback: true, desired, hash, profile, reason };
   }
   if (!exists) {
-    const reason = `env ${profile.name}: image ${desired} is not published; using ${input.fallbackImage}`;
-    log(`[kennel] ${reason}`);
     if (input.rebuild) {
       void input.rebuild(profile, hash, desired).catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         log(`[kennel] env ${profile.name}: rebuild of ${desired} failed: ${message}`);
       });
     }
+    // A lockfile bump on the default branch should not drop the session to the
+    // bare base image (no bun, no Postgres). Use the newest image built for an
+    // earlier lockfile revision; the agent reinstalls dependencies.
+    for (const older of input.previousLockfiles ?? []) {
+      const olderName = imageName(profile, hashLockfiles(older));
+      if (olderName === desired) continue;
+      let found = false;
+      try {
+        found = await input.imageExists(olderName);
+      } catch {
+        found = false;
+      }
+      if (found) {
+        const reason = `env ${profile.name}: image ${desired} is not published; using ${olderName} built for an earlier lockfile`;
+        log(`[kennel] ${reason}`);
+        return { image: olderName, fallback: false, stale: true, desired, hash, profile, reason };
+      }
+    }
+    const reason = `env ${profile.name}: image ${desired} is not published; using ${input.fallbackImage}`;
+    log(`[kennel] ${reason}`);
     return { image: input.fallbackImage, fallback: true, desired, hash, profile, reason };
   }
   return { image: desired, fallback: false, desired, hash, profile };

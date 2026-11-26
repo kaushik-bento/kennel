@@ -72,6 +72,8 @@ export interface ImageDecision {
   hash?: string;
   profile: EnvProfile | null;
   reason?: string;
+  /** The image was built for an older lockfile; dependencies may need a fresh install. */
+  stale?: boolean;
 }
 
 export interface CheckRecord {

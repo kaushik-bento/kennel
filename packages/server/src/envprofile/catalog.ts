@@ -64,9 +64,10 @@ export class EnvCatalog {
     const profile = this.match(repo);
     if (options.skipImage) return this.localPlan(profile);
     let lockfiles: LockfileSnapshot[] | null = null;
+    let previousLockfiles: LockfileSnapshot[][] = [];
     if (profile) {
       try {
-        lockfiles = await this.readLockfiles(repo, profile);
+        ({ lockfiles, previous: previousLockfiles } = await this.readLockfileHistory(repo, profile));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         options.log?.(`[kennel] env ${profile.name}: ${message}`);
@@ -77,12 +78,16 @@ export class EnvCatalog {
       fallbackImage: options.fallbackImage,
       profile,
       lockfiles,
+      previousLockfiles,
       imageExists: options.imageExists,
       ...(options.rebuild ? { rebuild: options.rebuild } : {}),
       ...(options.log ? { log: options.log } : {}),
     });
     if (!decision.profile) return { decision, resources: {}, environment: null };
     const script = decision.fallback ? "" : planImage(decision.profile).sessionScript;
+    const staleNote = decision.stale
+      ? "\n\nThis sandbox image was built for an older lockfile on the default branch. Run the dependency install (for example `bun install --frozen-lockfile`) before tests.\n"
+      : "";
     return {
       decision,
       resources: sessionResources(decision.profile),
@@ -90,7 +95,7 @@ export class EnvCatalog {
         profile: decision.profile.name,
         image: decision.image,
         fallback: decision.fallback,
-        testingDoc: renderTestingDoc(decision.profile, { fallback: decision.fallback }),
+        testingDoc: renderTestingDoc(decision.profile, { fallback: decision.fallback }) + staleNote,
         sessionScript: script,
         env: decision.profile.env,
         stripEnv: decision.profile.stripEnv,
@@ -127,10 +132,36 @@ export class EnvCatalog {
     return { sha, lockfiles };
   }
 
-  private async readLockfiles(repo: string, profile: EnvProfile): Promise<LockfileSnapshot[]> {
-    if (profile.lockfiles.length === 0) return [];
-    const inspected = await this.inspect(repo, profile);
-    return inspected.lockfiles;
+  /** Current lockfiles plus up to PREVIOUS_LOCKFILE_REVISIONS older revisions, newest first. */
+  private async readLockfileHistory(
+    repo: string,
+    profile: EnvProfile,
+  ): Promise<{ lockfiles: LockfileSnapshot[]; previous: LockfileSnapshot[][] }> {
+    if (profile.lockfiles.length === 0) return { lockfiles: [], previous: [] };
+    const dir = await this.ensureClone(repo);
+    const rev = await defaultRev(dir);
+    const lockfiles = await showLockfiles(dir, rev, profile.lockfiles);
+    const previous: LockfileSnapshot[][] = [];
+    try {
+      const log = await runCommand("git", [
+        "-C",
+        dir,
+        "log",
+        "--format=%H",
+        `-n${PREVIOUS_LOCKFILE_REVISIONS + 1}`,
+        rev,
+        "--",
+        ...profile.lockfiles,
+      ]);
+      const commits = log.split("\n").map((line) => line.trim()).filter(Boolean);
+      for (const commit of commits) {
+        const files = await showLockfiles(dir, commit, profile.lockfiles);
+        if (hashLockfiles(files) !== hashLockfiles(lockfiles)) previous.push(files);
+      }
+    } catch {
+      // History is only a fallback; a shallow or broken clone still gets the base image.
+    }
+    return { lockfiles, previous };
   }
 
   private async ensureClone(repo: string): Promise<string> {
@@ -144,6 +175,8 @@ export class EnvCatalog {
     return dir;
   }
 }
+
+const PREVIOUS_LOCKFILE_REVISIONS = 8;
 
 async function defaultRev(dir: string): Promise<string> {
   try {

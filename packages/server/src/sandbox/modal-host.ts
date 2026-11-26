@@ -18,8 +18,23 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
   const app = await modal.apps.fromName(config.modalApp, { createIfMissing: true, ...envParams });
   const image = await modal.images.fromName(config.modalImage, envParams);
   const secret = await modal.secrets.fromName(config.modalSecret, envParams);
+  // Eval keys and other optional credentials live in their own Modal Secrets,
+  // attached by name next to the agent secret. A missing one is skipped.
+  const extraSecrets: Array<typeof secret> = [];
+  const attached: string[] = [];
+  for (const name of config.modalExtraSecrets) {
+    if (name === config.modalSecret) continue;
+    try {
+      extraSecrets.push(await modal.secrets.fromName(name, envParams));
+      attached.push(name);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[kennel] extra secret ${name} unavailable (${message}); sandboxes start without it`);
+    }
+  }
   console.log(
     `[kennel] modal app=${config.modalApp} image=${config.modalImage} secret=${config.modalSecret}` +
+      (attached.length > 0 ? ` extra-secrets=${attached.join(",")}` : "") +
       (environment ? ` environment=${environment}` : ""),
   );
 
@@ -45,7 +60,7 @@ export async function connectModalHost(config: KennelConfig): Promise<ModalHost>
       const createParams = {
         name,
         volumes: { "/var/kennel": volume },
-        secrets: [secret],
+        secrets: [secret, ...extraSecrets],
         timeoutMs: config.modalSandboxTimeoutMs,
         idleTimeoutMs: config.modalSandboxTimeoutMs,
         workdir: "/var/kennel",

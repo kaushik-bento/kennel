@@ -19,6 +19,8 @@ export interface AgentConnection {
   sandboxId: string | null;
   startAgent(options: AgentStartOptions & { kind: AgentKind }): Promise<RunningAgent>;
   release(): Promise<void>;
+  /** Processes the agent started that are still running in the sandbox. Absent on backends that cannot tell. */
+  activity?(): Promise<{ busy: number; processes: string[] }>;
 }
 
 /**
@@ -49,6 +51,8 @@ export interface ModalOpenSpec {
   sessionId: string;
   volumeName: string;
   secretName: string;
+  /** Extra Modal Secret names (eval keys). */
+  extraSecretNames?: string[];
   imageName?: string;
   cpu?: number;
   memoryMiB?: number;
